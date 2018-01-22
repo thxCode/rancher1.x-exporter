@@ -1,0 +1,14 @@
+.git
+.gitignore
+
+/.idea
+/vendor
+/.build
+/hooks
+LICENSE
+VERSION
+README.md
+
+.DS_Store
+
+/node_modules
