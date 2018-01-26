@@ -2,19 +2,6 @@
 
 ## Counter Metrics
 
-### Rancher projects(environments) total counter
-
-```
-# HELP rancher_project_bootstrap_total Current total number of the started projects in Rancher.
-# TYPE rancher_project_bootstrap_total counter
-rancher_project_bootstrap_total{id, name, type} [1|0]
-
-# HELP rancher_project_failure_total Current total number of the failure projects in Rancher.
-# TYPE rancher_project_failure_total counter
-rancher_project_failure_total{id, name, type} [1|0]
-
-```
-
 ### Rancher stacks total counter
 
 ```

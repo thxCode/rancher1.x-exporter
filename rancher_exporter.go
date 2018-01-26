@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,28 +18,27 @@ import (
 	"github.com/urfave/cli"
 )
 
-const (
-	// Used to prepand Prometheus metrics created by this exporter.
-	namespace = "rancher"
-)
-
 var (
+	backupIntervalSeconds time.Duration
+	scrapeTimeoutSeconds  time.Duration
+	listenAddress         string
+	metricPath            string
+	cattleURL             string
+	cattleAccessKey       string
+	cattleSecretKey       string
+	hideSys               string
+	genObjName            string
+
 	log = logrus.New()
-
-	projectLabelNames   = []string{"id", "name", "type"}
-	stackLabelNames     = []string{"environment_id", "environment_name", "id", "name", "system", "type"}
-	serviceLabelNames   = []string{"environment_id", "environment_name", "stack_id", "stack_name", "id", "name", "system", "type"}
-	containerLabelNames = []string{"environment_id", "environment_name", "stack_id", "stack_name", "service_id", "service_name", "id", "name", "system", "type"}
-
-	listenAddress   string
-	metricPath      string
-	cattleURL       string
-	cattleAccessKey string
-	cattleSecretKey string
-	hideSys         bool
 )
 
 func main() {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Error(err)
+		}
+	}()
+
 	app := cli.NewApp()
 	app.Name = "rancher_exporter"
 	app.Version = version.Print("rancher_exporter")
@@ -44,6 +46,18 @@ func main() {
 	app.Action = appAction
 
 	app.Flags = []cli.Flag{
+		cli.IntFlag{
+			Name:   "backup_interval_seconds",
+			Usage:  "The seconds for rancher_exporter to backup the metrics from Rancher",
+			EnvVar: "BACKUP_INTERVAL_SECONDS",
+			Value: 300,
+		},
+		cli.IntFlag{
+			Name:   "scrape_timeout_seconds",
+			Usage:  "The timeout seconds for rancher_exporter to scrape the metrics from Rancher",
+			EnvVar: "SCRAPE_TIMEOUT_SECONDS",
+			Value:  30,
+		},
 		cli.StringFlag{
 			Name:   "listen_address",
 			Usage:  "The address of scraping the metrics",
@@ -87,17 +101,23 @@ func main() {
 	app.Run(os.Args)
 }
 
-func appAction(c *cli.Context) error {
-	ctx, cancelFn := context.WithCancel(context.Background())
-	stopChan := make(chan interface{})
+func appAction(c *cli.Context) {
+	stopChan := make(chan interface{}, 1)
+	defer close(stopChan)
 
 	// deal params
+	backupIntervalSeconds = time.Duration(c.Int("backup_interval_seconds"))
+	scrapeTimeoutSeconds = time.Duration(c.Int("scrape_timeout_seconds"))
 	listenAddress = c.String("listen_address")
 	metricPath = c.String("metric_path")
 	cattleURL = c.String("cattle_url")
 	cattleAccessKey = c.String("cattle_access_key")
 	cattleSecretKey = c.String("cattle_secret_key")
-	hideSys = c.Bool("hide_sys")
+	hideSys = strconv.FormatBool(c.Bool("hide_sys"))
+
+	hasher := sha1.New()
+	hasher.Write([]byte(cattleURL))
+	genObjName = hex.EncodeToString(hasher.Sum(nil))
 
 	// set logger
 	switch c.String("log_level") {
@@ -115,7 +135,7 @@ func appAction(c *cli.Context) error {
 
 	// cattle url
 	if cattleURL == "" {
-		return errors.New("cattle_url must be set and non-empty")
+		panic(errors.New("cattle_url must be set and non-empty"))
 	} else {
 		cattleURL = strings.Replace(cattleURL, "/v1", "/v2-beta", -1)
 
@@ -128,13 +148,21 @@ func appAction(c *cli.Context) error {
 	log.Infoln("Build context", version.BuildContext())
 
 	// create exporter
-	rancherExporter, err := NewExporter(ctx, stopChan)
-	if err != nil {
-		return err
-	}
+	exporter := newRancherExporter()
+	go func() {
+		ticket := time.NewTicker(backupIntervalSeconds * time.Second).C
+		for {
+			select {
+			case <-ticket:
+				exporter.m.backup()
+			case <-stopChan:
+				break
+			}
+		}
+	}()
 
 	// register exporter
-	prometheus.MustRegister(rancherExporter)
+	prometheus.MustRegister(exporter)
 	prometheus.MustRegister(version.NewCollector("rancher_exporter"))
 
 	// start web
@@ -150,36 +178,27 @@ func appAction(c *cli.Context) error {
              </html>`))
 	})
 	log.Fatal(http.ListenAndServe(listenAddress, nil))
+}
 
-	close(stopChan)
+/**
+	RancherExporter
+ */
+type rancherExporter struct {
+	m *metric
+}
+
+func (e *rancherExporter) Describe(ch chan<- *prometheus.Desc) {
+	e.m.describe(ch)
+}
+
+func (e *rancherExporter) Collect(ch chan<- prometheus.Metric) {
+	ctx, cancelFn := context.WithTimeout(context.TODO(), scrapeTimeoutSeconds)
+	e.m.fetch(ctx)
 	cancelFn()
 
-	return nil
+	e.m.collect(ch)
 }
 
-type RancherExporter struct {
-	infinityWorksMetrics *InfinityWorksMetrics
-	extendMetrics        *ExtendMetrics
-}
-
-func (e *RancherExporter) Describe(ch chan<- *prometheus.Desc) {
-	e.extendMetrics.Describe(ch)
-	e.infinityWorksMetrics.Describe(ch)
-}
-
-func (e *RancherExporter) Collect(ch chan<- prometheus.Metric) {
-	e.extendMetrics.Collect(ch)
-	e.infinityWorksMetrics.Collect(ch)
-}
-
-func NewExporter(ctx context.Context, stopChan <-chan interface{}) (*RancherExporter, error) {
-	infinityWorksMetrics := NewInfinityWorksMetrics()
-
-	extendMetrics := NewExtendMetrics()
-	extendMetrics.Fetch(ctx, time.Second*10, stopChan)
-
-	return &RancherExporter{
-		infinityWorksMetrics,
-		extendMetrics,
-	}, nil
+func newRancherExporter() *rancherExporter {
+	return &rancherExporter{newMetric(),}
 }
