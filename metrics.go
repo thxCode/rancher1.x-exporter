@@ -142,8 +142,6 @@ func newMetric() *metric {
 		Projects: make(map[string]project, 10),
 	}
 
-	m.recover() // recover info
-
 	return m
 }
 
@@ -158,18 +156,18 @@ func (r *rancherClient) get(url string) *target {
 	var t target
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		panic(err)
+		log.Error(err)
 	}
 
 	req.SetBasicAuth(cattleAccessKey, cattleSecretKey)
 	resp, err := r.client.Do(req)
 	if err != nil {
-		panic(err)
+		log.Error(err)
 	}
 	defer resp.Body.Close()
 
 	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
-		panic(err)
+		log.Error(err)
 	}
 
 	return &t
@@ -194,42 +192,46 @@ func (r *rancherClient) post(url string, body io.Reader) (int, error) {
 /**
 	target class
  */
-type target struct {
-	Data []struct {
-		HealthState    string   `json:"healthState,omitempty"`
-		Key            string   `json:"key,omitempty"`
-		Name           string   `json:"name,omitempty"`
-		State          string   `json:"state,omitempty"`
-		System         bool     `json:"system,omitempty"`
-		Scale          int      `json:"scale,omitempty"`
-		HostName       string   `json:"hostname,omitempty"`
-		ID             string   `json:"id,omitempty"`
-		StackID        string   `json:"stackId,omitempty"`
-		EnvID          string   `json:"environmentId,omitempty"`
-		Type           string   `json:"type,omitempty"`
-		AgentState     string   `json:"agentState,omitempty"`
-		CreatedTS      uint64   `json:"createdTS,omitempty"`
-		FirstRunningTS uint64   `json:"firstRunningTS,omitempty"`
-		ResourceData   *project `json:"resourceData,omitempty"`
-	} `json:"data"`
+type targetData struct {
+	HealthState    string   `json:"healthState,omitempty"`
+	Key            string   `json:"key,omitempty"`
+	Name           string   `json:"name,omitempty"`
+	State          string   `json:"state,omitempty"`
+	System         bool     `json:"system,omitempty"`
+	Scale          int      `json:"scale,omitempty"`
+	HostName       string   `json:"hostname,omitempty"`
+	ID             string   `json:"id,omitempty"`
+	StackID        string   `json:"stackId,omitempty"`
+	EnvID          string   `json:"environmentId,omitempty"`
+	Type           string   `json:"type,omitempty"`
+	AgentState     string   `json:"agentState,omitempty"`
+	CreatedTS      uint64   `json:"createdTS,omitempty"`
+	FirstRunningTS uint64   `json:"firstRunningTS,omitempty"`
+	ResourceData   *project `json:"resourceData,omitempty"`
+}
 
-	Pagination struct {
-		Next string `json:"next,omitempty"`
-	} `json:"pagination"`
+type targetPagination struct {
+	Next string `json:"next,omitempty"`
+}
+
+type target struct {
+	Data []*targetData `json:"data"`
+
+	Pagination *targetPagination `json:"pagination"`
 }
 
 /**
 	object class
  */
 type object struct {
-	Id          string `json:"id,omitempty"`
-	Name        string `json:"name,omitempty"`
-	State       string `json:"state,omitempty"`
-	HealthState string `json:"healthState,omitempty"`
-	Type        string `json:"type,omitempty"`
+	Id          string `json:"id"`
+	Name        string `json:"name"`
+	State       string `json:"state"`
+	HealthState string `json:"healthState"`
+	Type        string `json:"type"`
 
-	BootstrapCount uint64 `json:"bootstrapCount,omitempty"`
-	FailureCount   uint64 `json:"failureCount,omitempty"`
+	BootstrapCount uint64 `json:"bootstrapCount"`
+	FailureCount   uint64 `json:"failureCount"`
 }
 
 /**
@@ -238,7 +240,7 @@ type object struct {
 type instance struct {
 	*object
 	System      bool   `json:"system"`
-	StartupTime uint64 `json:"startupTime,omitempty"`
+	StartupTime uint64 `json:"startupTime"`
 	parent      *service
 }
 
@@ -253,11 +255,21 @@ type service struct {
 }
 
 func (o *service) fetch(ctx context.Context, rancherClient *rancherClient) {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Error(err)
+		}
+	}()
+
+	if len(o.Id) == 0 {
+		return
+	}
+
+	log.Debugln(">>> fetch instances on service:", o.Name, "on stack:", o.parent.Name, "on project:", o.parent.parent.Name)
+
 	url := cattleURL + "/services/" + o.Id + "/instances?limit=100&sort=id"
 
 	for {
-		log.Infoln(">>> start fetch instance metrics on ", url)
-
 		t := rancherClient.get(url)
 
 		for _, d := range t.Data {
@@ -319,8 +331,6 @@ func (o *service) fetch(ctx context.Context, rancherClient *rancherClient) {
 			instanceBootstrapMsCost.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Set(float64(instanceStartupTime))
 		}
 
-		log.Infoln(">>> end fetch instance metrics")
-
 		if len(t.Pagination.Next) != 0 {
 			url = t.Pagination.Next
 		} else {
@@ -328,6 +338,7 @@ func (o *service) fetch(ctx context.Context, rancherClient *rancherClient) {
 		}
 	}
 
+	log.Debugln("<<< fetch instances on service:", o.Name, "on stack:", o.parent.Name, "on project:", o.parent.parent.Name)
 }
 
 /**
@@ -341,11 +352,26 @@ type stack struct {
 }
 
 func (o *stack) fetch(ctx context.Context, rancherClient *rancherClient) {
-	url := cattleURL + "/stacks/" + o.Id + "/services?limit=100&sort=id&system=" + hideSys
+	defer func() {
+		if err := recover(); err != nil {
+			log.Error(err)
+		}
+	}()
+
+	if len(o.Id) == 0 {
+		return
+	}
+
+	log.Debugln(">> fetch service on stack:", o.Name, "on project:", o.parent.Name)
+
+	var url string
+	if hideSys {
+		url = cattleURL + "/stacks/" + o.Id + "/services?limit=100&sort=id&system=false"
+	} else {
+		url = cattleURL + "/stacks/" + o.Id + "/services?limit=100&sort=id"
+	}
 
 	for {
-		log.Infoln(">> start fetch service metrics on ", url)
-
 		t := rancherClient.get(url)
 
 		for _, d := range t.Data {
@@ -420,8 +446,6 @@ func (o *stack) fetch(ctx context.Context, rancherClient *rancherClient) {
 			}
 		}
 
-		log.Infoln(">> end fetch service metrics")
-
 		if len(t.Pagination.Next) != 0 {
 			url = t.Pagination.Next
 		} else {
@@ -432,13 +456,15 @@ func (o *stack) fetch(ctx context.Context, rancherClient *rancherClient) {
 	wg := &sync.WaitGroup{}
 	for _, d := range o.Services {
 		wg.Add(1)
-		go func(d *service) {
+		go func(svc service) {
 			defer wg.Done()
 
-			d.fetch(ctx, rancherClient)
-		}(&d)
+			svc.fetch(ctx, rancherClient)
+		}(d)
 	}
 	wg.Wait()
+
+	log.Debugln("<< fetch service on stack:", o.Name, "on project:", o.parent.Name)
 }
 
 /**
@@ -450,11 +476,26 @@ type project struct {
 }
 
 func (o *project) fetch(ctx context.Context, rancherClient *rancherClient) {
-	url := cattleURL + "/projects/" + o.Id + "/stacks?limit=100&sort=id&system=" + hideSys
+	defer func() {
+		if err := recover(); err != nil {
+			log.Error(err)
+		}
+	}()
+
+	if len(o.Id) == 0 {
+		return
+	}
+
+	log.Debugln("> fetch stacks on project:", o.Name)
+
+	var url string
+	if hideSys {
+		url = cattleURL + "/projects/" + o.Id + "/stacks?limit=100&sort=id&system=false"
+	} else {
+		url = cattleURL + "/projects/" + o.Id + "/stacks?limit=100&sort=id"
+	}
 
 	for {
-		log.Infoln("> start fetch stack metrics on ", url)
-
 		t := rancherClient.get(url)
 
 		for _, d := range t.Data {
@@ -524,8 +565,6 @@ func (o *project) fetch(ctx context.Context, rancherClient *rancherClient) {
 			}
 		}
 
-		log.Infoln("> end fetch stack metrics")
-
 		if len(t.Pagination.Next) != 0 {
 			url = t.Pagination.Next
 		} else {
@@ -536,14 +575,15 @@ func (o *project) fetch(ctx context.Context, rancherClient *rancherClient) {
 	wg := &sync.WaitGroup{}
 	for _, d := range o.Stacks {
 		wg.Add(1)
-		go func(d *stack) {
+		go func(stk stack) {
 			defer wg.Done()
 
-			d.fetch(ctx, rancherClient)
-		}(&d)
+			stk.fetch(ctx, rancherClient)
+		}(d)
 	}
 	wg.Wait()
 
+	log.Debugln("< fetch stacks on project:", o.Name)
 }
 
 /**
@@ -555,9 +595,15 @@ type metric struct {
 }
 
 func (o *metric) recover() {
-	log.Infoln("start recover metrics")
+	defer func() {
+		if err := recover(); err != nil {
+			log.Error(err)
+		}
+	}()
 
-	rancherClient := newRancherClient(scrapeTimeoutSeconds)
+	log.Debugln("start recover metrics")
+
+	rancherClient := newRancherClient(0)
 
 	t := rancherClient.get(cattleURL + "/projects")
 
@@ -583,52 +629,96 @@ func (o *metric) recover() {
 	wg := &sync.WaitGroup{}
 	for _, d := range o.Projects {
 		wg.Add(1)
-		go func(d project) {
+		go func(pro project) {
 			defer wg.Done()
 
 			var (
-				envId   = d.Id
-				envName = d.Name
+				envId   = pro.Id
+				envName = pro.Name
 			)
 
-			t := rancherClient.get(cattleURL + "/genericobjects?kind=rancherExporter&name=" + genObjName + "&key=" + d.Id)
+			t := rancherClient.get(cattleURL + "/genericobjects?kind=rancherExporter2&name=" + genObjName + "&key=" + envId)
 			if l := len(t.Data); l != 0 {
 				storeProject := t.Data[l-1].ResourceData
 				for _, sStack := range storeProject.Stacks {
-					sStack.parent = &d
-
 					var (
 						stackId     = sStack.Id
 						stackName   = sStack.Name
 						stackSystem = strconv.FormatBool(sStack.System)
 						stackType   = sStack.Type
+
+						stk = stack{
+							&object{
+								stackId,
+								stackName,
+								sStack.State,
+								sStack.HealthState,
+								stackType,
+								sStack.BootstrapCount,
+								sStack.FailureCount,
+							},
+							make(map[string]service, 100),
+							sStack.System,
+							&pro,
+						}
 					)
+
+					pro.Stacks[stackName] = stk
 
 					totalStackBootstrap.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType).Add(float64(sStack.BootstrapCount))
 					totalStackFailure.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType).Add(float64(sStack.FailureCount))
 
 					for _, sService := range sStack.Services {
-						sService.parent = &sStack
-
 						var (
 							serviceId     = sService.Id
 							serviceName   = sService.Name
 							serviceSystem = strconv.FormatBool(sService.System)
 							serviceType   = sService.Type
+
+							svc = service{
+								&object{
+									serviceId,
+									serviceName,
+									sService.State,
+									sService.HealthState,
+									serviceType,
+									sService.BootstrapCount,
+									sService.FailureCount,
+								},
+								make(map[string]instance, 100),
+								sService.System,
+								&stk,
+							}
 						)
+
+						stk.Services[serviceName] = svc
 
 						totalServiceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType).Add(float64(sService.BootstrapCount))
 						totalServiceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType).Add(float64(sService.FailureCount))
 
 						for _, sInstance := range sService.Instances {
-							sInstance.parent = &sService
-
 							var (
 								instanceId     = sInstance.Id
 								instanceName   = sInstance.Name
 								instanceSystem = strconv.FormatBool(sInstance.System)
 								instanceType   = sInstance.Type
+
+								ins = instance{
+									&object{
+										Id:             instanceId,
+										Name:           instanceName,
+										State:          sInstance.State,
+										Type:           instanceType,
+										BootstrapCount: sInstance.BootstrapCount,
+										FailureCount:   sInstance.FailureCount,
+									},
+									sInstance.System,
+									sInstance.StartupTime,
+									&svc,
+								}
 							)
+
+							svc.Instances[instanceName] = ins
 
 							totalInstanceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Add(float64(sInstance.BootstrapCount))
 							totalInstanceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Add(float64(sInstance.FailureCount))
@@ -636,81 +726,94 @@ func (o *metric) recover() {
 							instanceBootstrapMsCost.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Set(float64(sInstance.StartupTime))
 						}
 					}
-
-					d.Stacks[sStack.Name] = sStack
 				}
 			}
 		}(d)
 	}
 	wg.Wait()
 
-	log.Infoln("end recover metrics")
+	log.Debugln("end recover metrics")
 }
 
 func (o *metric) backup() {
-	o.m.RLock()
-	log.Infoln("start backup metrics")
+	defer func() {
+		if err := recover(); err != nil {
+			log.Error(err)
+		}
+	}()
 
-	genObjIds := make(map[string]string, 10) // key(projectId):id(genObjId)
+	o.m.RLock()
+	log.Debugln("start backup metrics")
+
+	genObjIdsMap := make(map[string][]string, len(o.Projects)) // key(projectId):id(genObjId)
 	rancherClient := newRancherClient(0)
 
 	// fetch again
-	t := rancherClient.get(cattleURL + "/genericobjects?kind=rancherExporter&name=" + genObjName)
+	t := rancherClient.get(cattleURL + "/genericobjects?kind=rancherExporter2&name=" + genObjName)
 	for _, d := range t.Data {
-		genObjIds[d.Key] = d.ID
+		if _, ok := genObjIdsMap[d.Key]; ok {
+			genObjIdsMap[d.Key] = append(genObjIdsMap[d.Key], d.ID)
+		} else {
+			genObjIdsMap[d.Key] = []string{d.ID}
+		}
 	}
 
-	// create 201
-	//http.StatusCreated
-	cCh := make(chan string)
+	// create new
+	wg := &sync.WaitGroup{}
 	for _, d := range o.Projects {
-		go func(url string) {
+		wg.Add(1)
+		go func(pro project) {
+			defer wg.Done()
+
 			data := make(map[string]interface{})
-			data["kind"] = "rancherExporter"
+			data["kind"] = "rancherExporter2"
 			data["name"] = genObjName
-			data["key"] = d.Id
-			data["resourceData"] = d
+			data["key"] = pro.Id
+			data["resourceData"] = pro
 
 			dataJson, err := json.Marshal(data)
 			if err != nil {
-				log.Errorf("*error created on %v", err)
+				log.Warnf("error created on %v", err)
 				return
 			}
 
-			statusCode, err := rancherClient.post(url, bytes.NewBuffer(dataJson))
+			statusCode, err := rancherClient.post(cattleURL+"/genericobjects", bytes.NewBuffer(dataJson))
 			if err != nil {
-				log.Errorf("*error created on %v", err)
+				log.Warnf("error created on %v", err)
 			} else if statusCode != http.StatusCreated {
-				log.Errorln("*error created on ", url)
+				log.Warnln("error created on ", cattleURL+"/genericobjects")
 			} else {
-				cCh <- d.Id
+				// delete old
+				if genObjIds, ok := genObjIdsMap[pro.Id]; ok {
+					for _, genObjId := range genObjIds {
+						url := cattleURL + "/genericobjects/" + genObjId + "?action=remove"
+
+						statusCode, err := rancherClient.post(url, nil)
+						if err != nil {
+							log.Warnf("error deleted on %v", err)
+						} else if statusCode != http.StatusAccepted {
+							log.Warnln("error deleted on", url)
+						}
+					}
+				}
 			}
-		}(cattleURL + "/genericobjects")
+		}(d)
 	}
+	wg.Wait()
 
-	// delete 202
-	//http.StatusAccepted
-	select {
-	case projectId := <-cCh:
-		url := cattleURL + "/genericobjects/" + genObjIds[projectId] + "?action=remove"
-
-		statusCode, err := rancherClient.post(url, nil)
-		if err != nil {
-			log.Errorf("*error deleted on %v", err)
-		} else if statusCode != http.StatusAccepted {
-			log.Errorln("*error deleted on ", url)
-		}
-	case <-time.After(backupIntervalSeconds * time.Second):
-		log.Warnf("*timeout and finish")
-	}
-
-	log.Infoln("end backup metrics")
+	log.Debugln("end backup metrics")
 	o.m.RUnlock()
 }
 
 func (o *metric) fetch(ctx context.Context) {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Error(err)
+		}
+	}()
+
 	o.m.Lock()
-	log.Infoln("start fetch metrics")
+	log.Debugln("start fetch metrics")
 
 	// reset InfinityWorks metrics
 	hostsState.Reset()
@@ -721,7 +824,7 @@ func (o *metric) fetch(ctx context.Context) {
 	servicesHealth.Reset()
 	servicesState.Reset()
 
-	rancherClient := newRancherClient(0)
+	rancherClient := newRancherClient(scrapeTimeoutSeconds)
 	gwg := &sync.WaitGroup{}
 
 	// InfinityWorks metrics
@@ -739,7 +842,7 @@ func (o *metric) fetch(ctx context.Context) {
 				hostAgentState = d.AgentState
 			)
 
-			if d.Name != "" {
+			if len(d.Name) != 0 {
 				hostName = d.Name
 			}
 
@@ -790,18 +893,18 @@ func (o *metric) fetch(ctx context.Context) {
 		wg := &sync.WaitGroup{}
 		for _, d := range o.Projects {
 			wg.Add(1)
-			go func(d *project) {
+			go func(pro project) {
 				defer wg.Done()
 
-				d.fetch(ctx, rancherClient)
-			}(&d)
+				pro.fetch(ctx, rancherClient)
+			}(d)
 		}
 		wg.Wait()
 	}()
 
 	gwg.Wait()
 
-	log.Infoln("end fetch metrics")
+	log.Debugln("end fetch metrics")
 	o.m.Unlock()
 }
 

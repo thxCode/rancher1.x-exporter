@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +25,10 @@ var (
 	cattleURL             string
 	cattleAccessKey       string
 	cattleSecretKey       string
-	hideSys               string
+	hideSys               bool
+	withoutBackup         bool
+	withoutRecover        bool
+	highSpeedMode         bool
 	genObjName            string
 
 	log = logrus.New()
@@ -50,7 +52,7 @@ func main() {
 			Name:   "backup_interval_seconds",
 			Usage:  "The seconds for rancher_exporter to backup the metrics from Rancher",
 			EnvVar: "BACKUP_INTERVAL_SECONDS",
-			Value: 300,
+			Value:  300,
 		},
 		cli.IntFlag{
 			Name:   "scrape_timeout_seconds",
@@ -59,42 +61,66 @@ func main() {
 			Value:  30,
 		},
 		cli.StringFlag{
-			Name:   "listen_address",
-			Usage:  "The address of scraping the metrics",
-			EnvVar: "LISTEN_ADDRESS",
-			Value:  "0.0.0.0:9173",
+			Name:        "listen_address",
+			Usage:       "The address of scraping the metrics",
+			EnvVar:      "LISTEN_ADDRESS",
+			Value:       "0.0.0.0:9173",
+			Destination: &listenAddress,
 		},
 		cli.StringFlag{
-			Name:   "metric_path",
-			Usage:  "The path of exposing metrics",
-			EnvVar: "METRIC_PATH",
-			Value:  "/metrics",
+			Name:        "metric_path",
+			Usage:       "The path of exposing metrics",
+			EnvVar:      "METRIC_PATH",
+			Value:       "/metrics",
+			Destination: &metricPath,
 		},
 		cli.StringFlag{
-			Name:   "cattle_url",
-			Usage:  "The URL of Rancher Server API, e.g. http://127.0.0.1:8080",
-			EnvVar: "CATTLE_URL",
+			Name:        "cattle_url",
+			Usage:       "The URL of Rancher Server API, e.g. http://127.0.0.1:8080",
+			EnvVar:      "CATTLE_URL",
+			Destination: &cattleURL,
 		},
 		cli.StringFlag{
-			Name:   "cattle_access_key",
-			Usage:  "The access key for Rancher API",
-			EnvVar: "CATTLE_ACCESS_KEY",
+			Name:        "cattle_access_key",
+			Usage:       "The access key for Rancher API",
+			EnvVar:      "CATTLE_ACCESS_KEY",
+			Destination: &cattleAccessKey,
 		},
 		cli.StringFlag{
-			Name:   "cattle_secret_key",
-			Usage:  "The secret key for Rancher API",
-			EnvVar: "CATTLE_SECRET_KEY",
+			Name:        "cattle_secret_key",
+			Usage:       "The secret key for Rancher API",
+			EnvVar:      "CATTLE_SECRET_KEY",
+			Destination: &cattleSecretKey,
 		},
 		cli.StringFlag{
 			Name:   "log_level",
 			Usage:  "Set the logging level",
 			EnvVar: "LOG_LEVEL",
-			Value:  "info",
+			Value:  "debug",
 		},
 		cli.BoolFlag{
-			Name:   "hide_sys",
-			Usage:  "Hide the system metrics",
-			EnvVar: "HIDE_SYS",
+			Name:        "hide_sys",
+			Usage:       "Hide the system metrics",
+			EnvVar:      "HIDE_SYS",
+			Destination: &hideSys,
+		},
+		cli.BoolFlag{
+			Name:        "without_backup",
+			Usage:       "Don't backup the counter metrics",
+			EnvVar:      "WITHOUT_BACKUP",
+			Destination: &withoutBackup,
+		},
+		cli.BoolFlag{
+			Name:        "without_recover",
+			Usage:       "Don't recover the counter metrics",
+			EnvVar:      "WITHOUT_RECOVER",
+			Destination: &withoutRecover,
+		},
+		cli.BoolFlag{
+			Name:        "high_speed_mode",
+			Usage:       "High speed mode (scraping the metrics automatically by every 30s), will bring the loss of measurement accuracy, but with better performance",
+			EnvVar:      "HIGH_SPEED_MODE",
+			Destination: &highSpeedMode,
 		},
 	}
 
@@ -108,12 +134,6 @@ func appAction(c *cli.Context) {
 	// deal params
 	backupIntervalSeconds = time.Duration(c.Int("backup_interval_seconds"))
 	scrapeTimeoutSeconds = time.Duration(c.Int("scrape_timeout_seconds"))
-	listenAddress = c.String("listen_address")
-	metricPath = c.String("metric_path")
-	cattleURL = c.String("cattle_url")
-	cattleAccessKey = c.String("cattle_access_key")
-	cattleSecretKey = c.String("cattle_secret_key")
-	hideSys = strconv.FormatBool(c.Bool("hide_sys"))
 
 	hasher := sha1.New()
 	hasher.Write([]byte(cattleURL))
@@ -149,17 +169,42 @@ func appAction(c *cli.Context) {
 
 	// create exporter
 	exporter := newRancherExporter()
-	go func() {
-		ticket := time.NewTicker(backupIntervalSeconds * time.Second).C
-		for {
-			select {
-			case <-ticket:
-				exporter.m.backup()
-			case <-stopChan:
-				break
+
+	if !withoutRecover {
+		exporter.m.recover()
+	}
+
+	ctx, cancelFn := context.WithTimeout(context.Background(), scrapeTimeoutSeconds)
+	defer cancelFn()
+	if highSpeedMode {
+		exporter.m.fetch(ctx)
+
+		go func() {
+			ticket := time.NewTicker(30 * time.Second).C
+			for {
+				select {
+				case <-ticket:
+					exporter.m.fetch(ctx)
+				case <-stopChan:
+					break
+				}
 			}
-		}
-	}()
+		}()
+	}
+
+	if !withoutBackup {
+		go func() {
+			ticket := time.NewTicker(backupIntervalSeconds * time.Second).C
+			for {
+				select {
+				case <-ticket:
+					exporter.m.backup()
+				case <-stopChan:
+					break
+				}
+			}
+		}()
+	}
 
 	// register exporter
 	prometheus.MustRegister(exporter)
@@ -192,9 +237,9 @@ func (e *rancherExporter) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (e *rancherExporter) Collect(ch chan<- prometheus.Metric) {
-	ctx, cancelFn := context.WithTimeout(context.TODO(), scrapeTimeoutSeconds)
-	e.m.fetch(ctx)
-	cancelFn()
+	if !highSpeedMode {
+		e.m.fetch(context.Background())
+	}
 
 	e.m.collect(ch)
 }
