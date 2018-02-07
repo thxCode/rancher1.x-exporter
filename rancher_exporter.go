@@ -132,8 +132,8 @@ func appAction(c *cli.Context) {
 	defer close(stopChan)
 
 	// deal params
-	backupIntervalSeconds = time.Duration(c.Int("backup_interval_seconds"))
-	scrapeTimeoutSeconds = time.Duration(c.Int("scrape_timeout_seconds"))
+	backupIntervalSeconds = time.Duration(c.Int("backup_interval_seconds")) * time.Second
+	scrapeTimeoutSeconds = time.Duration(c.Int("scrape_timeout_seconds")) * time.Second
 
 	hasher := sha1.New()
 	hasher.Write([]byte(cattleURL))
@@ -194,7 +194,7 @@ func appAction(c *cli.Context) {
 
 	if !withoutBackup {
 		go func() {
-			ticket := time.NewTicker(backupIntervalSeconds * time.Second).C
+			ticket := time.NewTicker(backupIntervalSeconds).C
 			for {
 				select {
 				case <-ticket:
@@ -238,7 +238,10 @@ func (e *rancherExporter) Describe(ch chan<- *prometheus.Desc) {
 
 func (e *rancherExporter) Collect(ch chan<- prometheus.Metric) {
 	if !highSpeedMode {
-		e.m.fetch(context.Background())
+		ctx, fn := context.WithTimeout(context.Background(), scrapeTimeoutSeconds)
+		defer fn()
+
+		e.m.fetch(ctx)
 	}
 
 	e.m.collect(ch)

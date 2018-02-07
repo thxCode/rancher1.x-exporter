@@ -15,7 +15,8 @@ import (
 
 const (
 	// Used to prepand Prometheus metrics created by this exporter.
-	namespace = "rancher"
+	namespace         = "rancher"
+	genericobjectKind = "rancherMetrics"
 )
 
 var (
@@ -132,7 +133,7 @@ var (
  */
 func newRancherClient(timeoutSeconds time.Duration) *rancherClient {
 	return &rancherClient{
-		&http.Client{Timeout: timeoutSeconds * time.Second},
+		&http.Client{Timeout: timeoutSeconds},
 	}
 }
 
@@ -274,12 +275,11 @@ func (o *service) fetch(ctx context.Context, rancherClient *rancherClient) {
 
 		for _, d := range t.Data {
 			var (
-				instanceState       = d.State
-				instanceId          = d.ID
-				instanceName        = d.Name
-				instanceSystem      = strconv.FormatBool(d.System)
-				instanceType        = d.Type
-				instanceStartupTime = d.FirstRunningTS - d.CreatedTS
+				instanceState  = d.State
+				instanceId     = d.ID
+				instanceName   = d.Name
+				instanceSystem = strconv.FormatBool(d.System)
+				instanceType   = d.Type
 
 				serviceId   = o.Id
 				serviceName = o.Name
@@ -289,6 +289,8 @@ func (o *service) fetch(ctx context.Context, rancherClient *rancherClient) {
 
 				envId   = o.parent.parent.Id
 				envName = o.parent.parent.Name
+
+				instanceStartupTime uint64 = 0
 			)
 
 			// Extended metrics
@@ -298,6 +300,14 @@ func (o *service) fetch(ctx context.Context, rancherClient *rancherClient) {
 					case "running":
 						totalInstanceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
 						take.BootstrapCount += 1
+
+						// get startupTime when instance is running
+						if d.FirstRunningTS !=0 {
+							instanceStartupTime = d.FirstRunningTS - d.CreatedTS
+							instanceBootstrapMsCost.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Set(float64(instanceStartupTime))
+						}
+
+						take.StartupTime = instanceStartupTime
 					case "error":
 						totalInstanceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
 						take.FailureCount += 1
@@ -308,27 +318,43 @@ func (o *service) fetch(ctx context.Context, rancherClient *rancherClient) {
 				take.Type = instanceType
 				take.State = instanceState
 				take.System = d.System
-				take.StartupTime = instanceStartupTime
 			} else {
-				totalInstanceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
-				totalInstanceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType)
+				record := false
 
-				o.Instances[instanceName] = instance{
-					&object{
-						Id:             instanceId,
-						Name:           instanceName,
-						State:          instanceState,
-						Type:           instanceType,
-						BootstrapCount: 1,
-						FailureCount:   0,
-					},
-					d.System,
-					instanceStartupTime,
-					o,
+				switch instanceState {
+				case "error":
+					record = true
+					totalInstanceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType)
+					totalInstanceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
+				case "stopped":
+					fallthrough
+				case "running":
+					if d.FirstRunningTS !=0 {
+						instanceStartupTime = d.FirstRunningTS - d.CreatedTS
+						instanceBootstrapMsCost.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Set(float64(instanceStartupTime))
+					}
+
+					record = true
+					totalInstanceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
+					totalInstanceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType)
+				}
+
+				if record {
+					o.Instances[instanceName] = instance{
+						&object{
+							Id:             instanceId,
+							Name:           instanceName,
+							State:          instanceState,
+							Type:           instanceType,
+							BootstrapCount: 1,
+							FailureCount:   0,
+						},
+						d.System,
+						instanceStartupTime,
+						o,
+					}
 				}
 			}
-
-			instanceBootstrapMsCost.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Set(float64(instanceStartupTime))
 		}
 
 		if len(t.Pagination.Next) != 0 {
@@ -426,22 +452,34 @@ func (o *stack) fetch(ctx context.Context, rancherClient *rancherClient) {
 				take.HealthState = serviceHealthState
 				take.System = d.System
 			} else {
-				totalServiceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType).Inc()
-				totalServiceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType)
+				record := false
 
-				o.Services[serviceName] = service{
-					&object{
-						serviceId,
-						serviceName,
-						serviceState,
-						serviceHealthState,
-						serviceType,
-						1,
-						0,
-					},
-					make(map[string]instance, 100),
-					d.System,
-					o,
+				switch serviceState {
+				case "active":
+					record = true
+					totalServiceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType).Inc()
+					totalServiceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType)
+				case "error":
+					record = true
+					totalServiceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType)
+					totalServiceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType).Inc()
+				}
+
+				if record {
+					o.Services[serviceName] = service{
+						&object{
+							serviceId,
+							serviceName,
+							serviceState,
+							serviceHealthState,
+							serviceType,
+							1,
+							0,
+						},
+						make(map[string]instance, 100),
+						d.System,
+						o,
+					}
 				}
 			}
 		}
@@ -456,11 +494,11 @@ func (o *stack) fetch(ctx context.Context, rancherClient *rancherClient) {
 	wg := &sync.WaitGroup{}
 	for _, d := range o.Services {
 		wg.Add(1)
-		go func(svc service) {
+		go func(ctx context.Context, svc service) {
 			defer wg.Done()
 
 			svc.fetch(ctx, rancherClient)
-		}(d)
+		}(ctx, d)
 	}
 	wg.Wait()
 
@@ -545,22 +583,34 @@ func (o *project) fetch(ctx context.Context, rancherClient *rancherClient) {
 				take.HealthState = stackHealthState
 				take.System = d.System
 			} else {
-				totalStackBootstrap.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType).Inc()
-				totalStackFailure.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType)
+				record := false
 
-				o.Stacks[stackName] = stack{
-					&object{
-						stackId,
-						stackName,
-						stackState,
-						stackHealthState,
-						stackType,
-						1,
-						0,
-					},
-					make(map[string]service, 100),
-					d.System,
-					o,
+				switch stackState {
+				case "active":
+					record = true
+					totalStackBootstrap.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType).Inc()
+					totalStackFailure.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType)
+				case "error":
+					record = true
+					totalStackBootstrap.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType)
+					totalStackFailure.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType).Inc()
+				}
+
+				if record {
+					o.Stacks[stackName] = stack{
+						&object{
+							stackId,
+							stackName,
+							stackState,
+							stackHealthState,
+							stackType,
+							1,
+							0,
+						},
+						make(map[string]service, 100),
+						d.System,
+						o,
+					}
 				}
 			}
 		}
@@ -575,11 +625,11 @@ func (o *project) fetch(ctx context.Context, rancherClient *rancherClient) {
 	wg := &sync.WaitGroup{}
 	for _, d := range o.Stacks {
 		wg.Add(1)
-		go func(stk stack) {
+		go func(ctx context.Context, stk stack) {
 			defer wg.Done()
 
 			stk.fetch(ctx, rancherClient)
-		}(d)
+		}(ctx, d)
 	}
 	wg.Wait()
 
@@ -626,10 +676,13 @@ func (o *metric) recover() {
 		}
 	}
 
+	ctx, fn := context.WithTimeout(context.Background(), scrapeTimeoutSeconds)
+	defer fn()
+
 	wg := &sync.WaitGroup{}
 	for _, d := range o.Projects {
 		wg.Add(1)
-		go func(pro project) {
+		go func(ctx context.Context, pro project) {
 			defer wg.Done()
 
 			var (
@@ -637,7 +690,7 @@ func (o *metric) recover() {
 				envName = pro.Name
 			)
 
-			t := rancherClient.get(cattleURL + "/genericobjects?kind=rancherExporter2&name=" + genObjName + "&key=" + envId)
+			t := rancherClient.get(cattleURL + "/genericobjects?name=" + genObjName + "&key=" + envId + "&kind=" + genericobjectKind)
 			if l := len(t.Data); l != 0 {
 				storeProject := t.Data[l-1].ResourceData
 				for _, sStack := range storeProject.Stacks {
@@ -728,7 +781,7 @@ func (o *metric) recover() {
 					}
 				}
 			}
-		}(d)
+		}(ctx, d)
 	}
 	wg.Wait()
 
@@ -743,13 +796,14 @@ func (o *metric) backup() {
 	}()
 
 	o.m.RLock()
+	defer o.m.RUnlock()
 	log.Debugln("start backup metrics")
 
 	genObjIdsMap := make(map[string][]string, len(o.Projects)) // key(projectId):id(genObjId)
 	rancherClient := newRancherClient(0)
 
 	// fetch again
-	t := rancherClient.get(cattleURL + "/genericobjects?kind=rancherExporter2&name=" + genObjName)
+	t := rancherClient.get(cattleURL + "/genericobjects?name=" + genObjName + "&kind=" + genericobjectKind)
 	for _, d := range t.Data {
 		if _, ok := genObjIdsMap[d.Key]; ok {
 			genObjIdsMap[d.Key] = append(genObjIdsMap[d.Key], d.ID)
@@ -758,15 +812,18 @@ func (o *metric) backup() {
 		}
 	}
 
+	ctx, fn := context.WithTimeout(context.Background(), backupIntervalSeconds)
+	defer fn()
+
 	// create new
 	wg := &sync.WaitGroup{}
 	for _, d := range o.Projects {
 		wg.Add(1)
-		go func(pro project) {
+		go func(ctx context.Context, pro project) {
 			defer wg.Done()
 
 			data := make(map[string]interface{})
-			data["kind"] = "rancherExporter2"
+			data["kind"] = genericobjectKind
 			data["name"] = genObjName
 			data["key"] = pro.Id
 			data["resourceData"] = pro
@@ -797,12 +854,11 @@ func (o *metric) backup() {
 					}
 				}
 			}
-		}(d)
+		}(ctx, d)
 	}
 	wg.Wait()
 
 	log.Debugln("end backup metrics")
-	o.m.RUnlock()
 }
 
 func (o *metric) fetch(ctx context.Context) {
@@ -813,6 +869,7 @@ func (o *metric) fetch(ctx context.Context) {
 	}()
 
 	o.m.Lock()
+	defer o.m.Unlock()
 	log.Debugln("start fetch metrics")
 
 	// reset InfinityWorks metrics
@@ -829,7 +886,7 @@ func (o *metric) fetch(ctx context.Context) {
 
 	// InfinityWorks metrics
 	gwg.Add(1)
-	go func() {
+	go func(ctx context.Context) {
 		defer gwg.Done()
 
 		t := rancherClient.get(cattleURL + "/hosts")
@@ -862,11 +919,11 @@ func (o *metric) fetch(ctx context.Context) {
 				}
 			}
 		}
-	}()
+	}(ctx)
 
 	// Extended metrics
 	gwg.Add(1)
-	go func() {
+	go func(ctx context.Context) {
 		defer gwg.Done()
 
 		t := rancherClient.get(cattleURL + "/projects")
@@ -900,12 +957,11 @@ func (o *metric) fetch(ctx context.Context) {
 			}(d)
 		}
 		wg.Wait()
-	}()
+	}(ctx)
 
 	gwg.Wait()
 
 	log.Debugln("end fetch metrics")
-	o.m.Unlock()
 }
 
 func (o *metric) describe(ch chan<- *prometheus.Desc) {
