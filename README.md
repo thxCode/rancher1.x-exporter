@@ -39,8 +39,7 @@ GLOBAL OPTIONS:
    --cattle_secret_key value        The secret key for Rancher API [$CATTLE_SECRET_KEY]
    --log_level value                Set the logging level (default: "debug") [$LOG_LEVEL]
    --hide_sys                       Hide the system metrics [$HIDE_SYS]
-   --without_backup                 Don't backup the counter metrics [$WITHOUT_BACKUP]
-   --without_recover                Don't recover the counter metrics [$WITHOUT_RECOVER]
+   --with_backup                    Backup the counter metrics [$WITH_BACKUP]
    --high_speed_mode                High speed mode (scraping the metrics automatically by every 30s), will bring the loss of measurement accuracy, but with better performance [$HIGH_SPEED_MODE]
    --help, -h                       show help
    --version, -v                    print the version

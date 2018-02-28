@@ -298,17 +298,21 @@ func (o *service) fetch(ctx context.Context, rancherClient *rancherClient) {
 				if take.State != instanceState {
 					switch instanceState {
 					case "running":
-						totalInstanceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
-						take.BootstrapCount += 1
-
 						// get startupTime when instance is running
 						if d.FirstRunningTS !=0 {
 							instanceStartupTime = d.FirstRunningTS - d.CreatedTS
 							instanceBootstrapMsCost.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Set(float64(instanceStartupTime))
 						}
-
 						take.StartupTime = instanceStartupTime
+
+						totalInstanceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
+						take.BootstrapCount += 1
+
+						totalInstanceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType)
 					case "error":
+						totalInstanceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
+						take.BootstrapCount += 1
+
 						totalInstanceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
 						take.FailureCount += 1
 					}
@@ -324,7 +328,7 @@ func (o *service) fetch(ctx context.Context, rancherClient *rancherClient) {
 				switch instanceState {
 				case "error":
 					record = true
-					totalInstanceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType)
+					totalInstanceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
 					totalInstanceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, instanceId, instanceName, instanceSystem, instanceType).Inc()
 				case "stopped":
 					fallthrough
@@ -440,7 +444,12 @@ func (o *stack) fetch(ctx context.Context, rancherClient *rancherClient) {
 					case "active":
 						totalServiceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType).Inc()
 						take.BootstrapCount += 1
+
+						totalServiceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType)
 					case "error":
+						totalServiceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType).Inc()
+						take.BootstrapCount += 1
+
 						totalServiceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType).Inc()
 						take.FailureCount += 1
 					}
@@ -461,7 +470,7 @@ func (o *stack) fetch(ctx context.Context, rancherClient *rancherClient) {
 					totalServiceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType)
 				case "error":
 					record = true
-					totalServiceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType)
+					totalServiceBootstrap.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType).Inc()
 					totalServiceFailure.WithLabelValues(envId, envName, stackId, stackName, serviceId, serviceName, serviceSystem, serviceType).Inc()
 				}
 
@@ -571,7 +580,12 @@ func (o *project) fetch(ctx context.Context, rancherClient *rancherClient) {
 					case "active":
 						totalStackBootstrap.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType).Inc()
 						take.BootstrapCount += 1
+
+						totalStackFailure.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType)
 					case "error":
+						totalStackBootstrap.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType).Inc()
+						take.BootstrapCount += 1
+
 						totalStackFailure.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType).Inc()
 						take.FailureCount += 1
 					}
@@ -592,7 +606,7 @@ func (o *project) fetch(ctx context.Context, rancherClient *rancherClient) {
 					totalStackFailure.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType)
 				case "error":
 					record = true
-					totalStackBootstrap.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType)
+					totalStackBootstrap.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType).Inc()
 					totalStackFailure.WithLabelValues(envId, envName, stackId, stackName, stackSystem, stackType).Inc()
 				}
 

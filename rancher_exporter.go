@@ -26,8 +26,7 @@ var (
 	cattleAccessKey       string
 	cattleSecretKey       string
 	hideSys               bool
-	withoutBackup         bool
-	withoutRecover        bool
+	withBackup            bool
 	highSpeedMode         bool
 	genObjName            string
 
@@ -105,16 +104,10 @@ func main() {
 			Destination: &hideSys,
 		},
 		cli.BoolFlag{
-			Name:        "without_backup",
-			Usage:       "Don't backup the counter metrics",
-			EnvVar:      "WITHOUT_BACKUP",
-			Destination: &withoutBackup,
-		},
-		cli.BoolFlag{
-			Name:        "without_recover",
-			Usage:       "Don't recover the counter metrics",
-			EnvVar:      "WITHOUT_RECOVER",
-			Destination: &withoutRecover,
+			Name:        "with_backup",
+			Usage:       "Backup the counter metrics",
+			EnvVar:      "WITH_BACKUP",
+			Destination: &withBackup,
 		},
 		cli.BoolFlag{
 			Name:        "high_speed_mode",
@@ -170,7 +163,7 @@ func appAction(c *cli.Context) {
 	// create exporter
 	exporter := newRancherExporter()
 
-	if !withoutRecover {
+	if withBackup {
 		exporter.m.recover()
 	}
 
@@ -192,7 +185,7 @@ func appAction(c *cli.Context) {
 		}()
 	}
 
-	if !withoutBackup {
+	if withBackup {
 		go func() {
 			ticket := time.NewTicker(backupIntervalSeconds).C
 			for {
