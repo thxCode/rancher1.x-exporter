@@ -8,11 +8,11 @@
 
 # HELP rancher_stack_bootstrap_total Current total number of the started stacks in Rancher.
 # TYPE rancher_stack_bootstrap_total counter
-rancher_stack_bootstrap_total{environment_id, environment_name, id, name, type, system=[true|false]} [1|0]
+rancher_stack_bootstrap_total{environment_name, name, type, system=[true|false]} [1|0]
 
 # HELP rancher_stack_failure_total Current total number of the failure stacks in Rancher.
 # TYPE rancher_stack_failure_total counter
-rancher_stack_failure_total{environment_id, environment_name, id, name, type, system=[true|false]} [1|0]
+rancher_stack_failure_total{environment_name, name, type, system=[true|false]} [1|0]
 
 ```
 
@@ -21,11 +21,11 @@ rancher_stack_failure_total{environment_id, environment_name, id, name, type, sy
 ```
 # HELP rancher_service_bootstrap_total Current total number of the started services in Rancher.
 # TYPE rancher_service_bootstrap_total counter
-rancher_service_bootstrap_total{environment_id, environment_name, stack_id, stack_name, id, name, type, system=[true|false]} [1|0]
+rancher_service_bootstrap_total{environment_name, stack_name, name, type, system=[true|false]} [1|0]
 
 # HELP rancher_service_failure_total Current total number of the failure services in Rancher.
 # TYPE rancher_service_failure_total counter
-rancher_service_failure_total{environment_id, environment_name, id, name, type, system=[true|false]} [1|0]
+rancher_service_failure_total{environment_name, stack_name, name, type, system=[true|false]} [1|0]
 
 ```
 
@@ -37,11 +37,30 @@ rancher_service_failure_total{environment_id, environment_name, id, name, type, 
 ```
 # HELP rancher_instance_bootstrap_total Current total number of the started containers in Rancher.
 # TYPE rancher_instance_bootstrap_total counter
-rancher_instance_bootstrap_total{environment_id, environment_name, stack_id, stack_name, service_id, service_name, id, name, type} [1|0]
+rancher_instance_bootstrap_total{environment_name, stack_name, service_name, name, type, system=[true|false]} [1|0]
 
 # HELP rancher_instance_failure_total Current total number of the failure containers in Rancher.
 # TYPE rancher_instance_failure_total counter
-rancher_instance_failure_total{environment_id, environment_name, stack_id, stack_name, service_id, service_name, id, name, type} [1|0]
+rancher_instance_failure_total{environment_name, stack_name, service_name, name, type, system=[true|false]} [1|0]
+
+```
+
+
+### Rancher heartbeat
+
+```
+
+# HELP rancher_stack_heartbeat The heartbeat of stacks in Rancher.
+# TYPE rancher_stack_heartbeat counter
+rancher_stack_heartbeat{environment_name, name, type, system=[true|false]} 1
+
+# HELP rancher_service_heartbeat The heartbeat of services in Rancher.
+# TYPE rancher_service_heartbeat counter
+rancher_service_heartbeat{environment_name, stack_name, name, type, system=[true|false]} 1
+
+# HELP rancher_instance_heartbeat The heartbeat of instances in Rancher.
+# TYPE rancher_instance_heartbeat counter
+rancher_instance_heartbeat{environment_name, stack_name, service_name, name, type, system=[true|false]} 1
 
 ```
 
@@ -54,9 +73,9 @@ rancher_instance_failure_total{environment_id, environment_name, stack_id, stack
 
 ```
 
-# HELP rancher_instance_startup_ms The startup milliseconds of container in Rancher.
+# HELP rancher_instance_startup_ms The startup milliseconds of instances in Rancher.
 # TYPE rancher_instance_startup_ms gauge
-rancher_instance_startup_ms{environment_id, environment_name, stack_id, stack_name, service_id, service_name, id, name, type} milliseconds
+rancher_instance_startup_ms{environment_name, stack_name, service_name, name, type} milliseconds
 ```
 
 ## Rancher agents state gauge [infinityworks](https://github.com/infinityworks/prometheus-rancher-exporter)
