@@ -1,14 +1,10 @@
 package main
 
 import (
-	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,17 +14,12 @@ import (
 )
 
 var (
-	backupIntervalSeconds time.Duration
-	scrapeTimeoutSeconds  time.Duration
-	listenAddress         string
-	metricPath            string
-	cattleURL             string
-	cattleAccessKey       string
-	cattleSecretKey       string
-	hideSys               bool
-	withBackup            bool
-	highSpeedMode         bool
-	genObjName            string
+	listenAddress   string
+	metricPath      string
+	cattleURL       string
+	cattleAccessKey string
+	cattleSecretKey string
+	hideSys         bool
 
 	log = logrus.New()
 )
@@ -47,18 +38,6 @@ func main() {
 	app.Action = appAction
 
 	app.Flags = []cli.Flag{
-		cli.IntFlag{
-			Name:   "backup_interval_seconds",
-			Usage:  "The seconds for rancher_exporter to backup the metrics from Rancher",
-			EnvVar: "BACKUP_INTERVAL_SECONDS",
-			Value:  300,
-		},
-		cli.IntFlag{
-			Name:   "scrape_timeout_seconds",
-			Usage:  "The timeout seconds for rancher_exporter to scrape the metrics from Rancher",
-			EnvVar: "SCRAPE_TIMEOUT_SECONDS",
-			Value:  30,
-		},
 		cli.StringFlag{
 			Name:        "listen_address",
 			Usage:       "The address of scraping the metrics",
@@ -103,18 +82,6 @@ func main() {
 			EnvVar:      "HIDE_SYS",
 			Destination: &hideSys,
 		},
-		cli.BoolFlag{
-			Name:        "with_backup",
-			Usage:       "Backup the counter metrics",
-			EnvVar:      "WITH_BACKUP",
-			Destination: &withBackup,
-		},
-		cli.BoolFlag{
-			Name:        "high_speed_mode",
-			Usage:       "High speed mode (scraping the metrics automatically by every 30s), will bring the loss of measurement accuracy, but with better performance",
-			EnvVar:      "HIGH_SPEED_MODE",
-			Destination: &highSpeedMode,
-		},
 	}
 
 	app.Run(os.Args)
@@ -123,14 +90,6 @@ func main() {
 func appAction(c *cli.Context) {
 	stopChan := make(chan interface{}, 1)
 	defer close(stopChan)
-
-	// deal params
-	backupIntervalSeconds = time.Duration(c.Int("backup_interval_seconds")) * time.Second
-	scrapeTimeoutSeconds = time.Duration(c.Int("scrape_timeout_seconds")) * time.Second
-
-	hasher := sha1.New()
-	hasher.Write([]byte(cattleURL))
-	genObjName = hex.EncodeToString(hasher.Sum(nil))
 
 	// set logger
 	switch c.String("log_level") {
@@ -160,47 +119,10 @@ func appAction(c *cli.Context) {
 	log.Infoln("Starting rancher_exporter", version.Info(), ", with cattle URL: ", cattleURL, ", access key: ", cattleAccessKey, ", system services hidden: ", hideSys)
 	log.Infoln("Build context", version.BuildContext())
 
-	// create exporter
-	exporter := newRancherExporter()
-
-	if withBackup {
-		exporter.m.recover()
-	}
-
-	ctx, cancelFn := context.WithTimeout(context.Background(), scrapeTimeoutSeconds)
-	defer cancelFn()
-	if highSpeedMode {
-		exporter.m.fetch(ctx)
-
-		go func() {
-			ticket := time.NewTicker(30 * time.Second).C
-			for {
-				select {
-				case <-ticket:
-					exporter.m.fetch(ctx)
-				case <-stopChan:
-					break
-				}
-			}
-		}()
-	}
-
-	if withBackup {
-		go func() {
-			ticket := time.NewTicker(backupIntervalSeconds).C
-			for {
-				select {
-				case <-ticket:
-					exporter.m.backup()
-				case <-stopChan:
-					break
-				}
-			}
-		}()
-	}
+	re := newRancherExporter()
 
 	// register exporter
-	prometheus.MustRegister(exporter)
+	prometheus.MustRegister(re)
 	prometheus.MustRegister(version.NewCollector("rancher_exporter"))
 
 	// start web
@@ -216,30 +138,6 @@ func appAction(c *cli.Context) {
              </html>`))
 	})
 	log.Fatal(http.ListenAndServe(listenAddress, nil))
-}
 
-/**
-	RancherExporter
- */
-type rancherExporter struct {
-	m *metric
-}
-
-func (e *rancherExporter) Describe(ch chan<- *prometheus.Desc) {
-	e.m.describe(ch)
-}
-
-func (e *rancherExporter) Collect(ch chan<- prometheus.Metric) {
-	if !highSpeedMode {
-		ctx, fn := context.WithTimeout(context.Background(), scrapeTimeoutSeconds)
-		defer fn()
-
-		e.m.fetch(ctx)
-	}
-
-	e.m.collect(ch)
-}
-
-func newRancherExporter() *rancherExporter {
-	return &rancherExporter{newMetric(),}
+	re.Stop()
 }

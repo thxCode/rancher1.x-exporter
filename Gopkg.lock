@@ -15,6 +15,12 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/buger/jsonparser"
+  packages = ["."]
+  revision = "4be68c93a24430ddf9c33d1380b7042fd3a13424"
+
+[[projects]]
+  branch = "master"
   name = "github.com/golang/protobuf"
   packages = ["proto"]
   revision = "c65a0412e71e8b9b3bfd22925720d23c0f054237"
@@ -58,6 +64,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "fc0163e788de959891257bacd7de3ebc72bf9f82f76eb0a02d24e4c32ac4189a"
+  inputs-digest = "d9f29d4b5456146411a43d8da327e9fd1307ab59921c01263e5cd4b88111e275"
   solver-name = "gps-cdcl"
   solver-version = 1
