@@ -89,7 +89,62 @@ var (
 	 */
 
 	// total counter of stack, service, instance
-	extendingTotalStackBootstrap = prometheus.NewCounterVec(prometheus.CounterOpts{
+
+	extendingTotalStackInitializations = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "stacks_initialization_total",
+		Help:      "Current total number of the initialization stacks in Rancher",
+	}, []string{"environment_name", "name"})
+
+	extendingTotalSuccessStackInitialization = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "stacks_initialization_success_total",
+		Help:      "Current total number of the healthy and active initialization stacks in Rancher",
+	}, []string{"environment_name", "name"})
+
+	extendingTotalErrorStackInitialization = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "stacks_initialization_error_total",
+		Help:      "Current total number of the unhealthy or error initialization stacks in Rancher",
+	}, []string{"environment_name", "name"})
+
+	extendingTotalServiceInitializations = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "services_initialization_total",
+		Help:      "Current total number of the initialization services in Rancher",
+	}, []string{"environment_name", "stack_name", "name"})
+
+	extendingTotalSuccessServiceInitialization = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "services_initialization_success_total",
+		Help:      "Current total number of the healthy and active initialization services in Rancher",
+	}, []string{"environment_name", "stack_name", "name"})
+
+	extendingTotalErrorServiceInitialization = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "services_initialization_error_total",
+		Help:      "Current total number of the unhealthy or error initialization services in Rancher",
+	}, []string{"environment_name", "stack_name", "name"})
+
+	extendingTotalInstanceInitializations = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "instances_initialization_total",
+		Help:      "Current total number of the initialization instances in Rancher",
+	}, []string{"environment_name", "stack_name", "service_name", "name"})
+
+	extendingTotalSuccessInstanceInitialization = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "instances_initialization_success_total",
+		Help:      "Current total number of the healthy and active initialization instances in Rancher",
+	}, []string{"environment_name", "stack_name", "service_name", "name"})
+
+	extendingTotalErrorInstanceInitialization = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "instances_initialization_error_total",
+		Help:      "Current total number of the unhealthy or error initialization instances in Rancher",
+	}, []string{"environment_name", "stack_name", "service_name", "name"})
+
+	extendingTotalStackBootstraps = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "stacks_bootstrap_total",
 		Help:      "Current total number of the bootstrap stacks in Rancher",
@@ -214,16 +269,16 @@ type buffMsg struct {
 	RancherExporter
  */
 type rancherExporter struct {
-	projectName string
-	projectId   string
-
-	mutex        *sync.Mutex
-	wbs          *websocket.Conn
-	wbsReconnect func() *websocket.Conn
+	projectId     string
+	projectName   string
+	mutex         *sync.Mutex
+	websocketConn *websocket.Conn
 
 	stacksBuff    chan buffMsg
 	servicesBuff  chan buffMsg
 	instancesBuff chan buffMsg
+
+	recreateWebsocket func() *websocket.Conn
 }
 
 func (r *rancherExporter) Describe(ch chan<- *prometheus.Desc) {
@@ -235,7 +290,17 @@ func (r *rancherExporter) Describe(ch chan<- *prometheus.Desc) {
 	infinityWorksHostsState.Describe(ch)
 	infinityWorksHostAgentsState.Describe(ch)
 
-	extendingTotalStackBootstrap.Describe(ch)
+	extendingTotalStackInitializations.Describe(ch)
+	extendingTotalSuccessStackInitialization.Describe(ch)
+	extendingTotalErrorStackInitialization.Describe(ch)
+	extendingTotalServiceInitializations.Describe(ch)
+	extendingTotalSuccessServiceInitialization.Describe(ch)
+	extendingTotalErrorServiceInitialization.Describe(ch)
+	extendingTotalInstanceInitializations.Describe(ch)
+	extendingTotalSuccessInstanceInitialization.Describe(ch)
+	extendingTotalErrorInstanceInitialization.Describe(ch)
+
+	extendingTotalStackBootstraps.Describe(ch)
 	extendingTotalSuccessStackBootstrap.Describe(ch)
 	extendingTotalErrorStackBootstrap.Describe(ch)
 	extendingTotalServiceBootstraps.Describe(ch)
@@ -245,6 +310,7 @@ func (r *rancherExporter) Describe(ch chan<- *prometheus.Desc) {
 	extendingTotalSuccessInstanceBootstrap.Describe(ch)
 	extendingTotalErrorInstanceBootstrap.Describe(ch)
 	extendingInstanceBootstrapMsCost.Describe(ch)
+
 	extendingInstanceHeartbeat.Describe(ch)
 	extendingServiceHeartbeat.Describe(ch)
 	extendingStackHeartbeat.Describe(ch)
@@ -257,8 +323,8 @@ func (r *rancherExporter) Collect(ch chan<- prometheus.Metric) {
 }
 
 func (r *rancherExporter) Stop() {
-	if r.wbs != nil {
-		r.wbs.Close()
+	if r.websocketConn != nil {
+		r.websocketConn.Close()
 	}
 
 	close(r.instancesBuff)
@@ -268,23 +334,33 @@ func (r *rancherExporter) Stop() {
 
 func (r *rancherExporter) asyncMetrics(ch chan<- prometheus.Metric) {
 	// collect
-	extendingTotalStackBootstrap.Collect(ch)
+	extendingTotalStackBootstraps.Collect(ch)
 	extendingTotalSuccessStackBootstrap.Collect(ch)
 	extendingTotalErrorStackBootstrap.Collect(ch)
+	extendingTotalStackInitializations.Collect(ch)
+	extendingTotalSuccessStackInitialization.Collect(ch)
+	extendingTotalErrorStackInitialization.Collect(ch)
 
 	extendingTotalServiceBootstraps.Collect(ch)
 	extendingTotalSuccessServiceBootstrap.Collect(ch)
 	extendingTotalErrorServiceBootstrap.Collect(ch)
+	extendingTotalServiceInitializations.Collect(ch)
+	extendingTotalSuccessServiceInitialization.Collect(ch)
+	extendingTotalErrorServiceInitialization.Collect(ch)
 
 	extendingTotalInstanceBootstraps.Collect(ch)
 	extendingTotalSuccessInstanceBootstrap.Collect(ch)
 	extendingTotalErrorInstanceBootstrap.Collect(ch)
+	extendingTotalInstanceInitializations.Collect(ch)
+	extendingTotalSuccessInstanceInitialization.Collect(ch)
+	extendingTotalErrorInstanceInitialization.Collect(ch)
+
 	extendingInstanceBootstrapMsCost.Collect(ch)
 }
 
 func (r *rancherExporter) syncMetrics(ch chan<- prometheus.Metric) {
-	projectName := r.projectName
 	projectId := r.projectId
+	projectName := r.projectName
 
 	defer func() {
 		if err := recover(); err != nil {
@@ -518,12 +594,13 @@ func (r *rancherExporter) syncMetrics(ch chan<- prometheus.Metric) {
 func (r *rancherExporter) collectingExtending() {
 	glog := utils.GetGlobalLogger()
 
-	projectName := r.projectName
 	projectId := r.projectId
+	projectName := r.projectName
 
 	stackIdNameMap := &sync.Map{}
 
 	go func() {
+
 		hc := newHttpClient(30 * time.Second)
 		stacksAddress := cattleURL + "/projects/" + projectId + "/stacks?limit=100&sort=id"
 		if hideSys {
@@ -549,27 +626,38 @@ func (r *rancherExporter) collectingExtending() {
 
 						stackIdNameMap.Store(stackId, stackName)
 
+						// init bootstrap
+						extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag)
+						extendingTotalStackBootstraps.WithLabelValues(projectName, stackName)
+						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag)
+						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackName)
+						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
+						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackName)
+
 						switch stackState {
 						case "active":
 							if stackHealthState == "unhealthy" {
-								extendingTotalStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalStackBootstrap.WithLabelValues(projectName, stackName).Inc()
-
-								extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackName).Inc()
+								extendingTotalStackInitializations.WithLabelValues(projectName, specialTag).Inc()
+								extendingTotalStackInitializations.WithLabelValues(projectName, stackName).Inc()
+								extendingTotalSuccessStackInitialization.WithLabelValues(projectName, specialTag)
+								extendingTotalSuccessStackInitialization.WithLabelValues(projectName, stackName)
+								extendingTotalErrorStackInitialization.WithLabelValues(projectName, specialTag).Inc()
+								extendingTotalErrorStackInitialization.WithLabelValues(projectName, stackName).Inc()
 							} else if stackHealthState == "healthy" {
-								extendingTotalStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalStackBootstrap.WithLabelValues(projectName, stackName).Inc()
-
-								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackName).Inc()
+								extendingTotalStackInitializations.WithLabelValues(projectName, specialTag).Inc()
+								extendingTotalStackInitializations.WithLabelValues(projectName, stackName).Inc()
+								extendingTotalSuccessStackInitialization.WithLabelValues(projectName, specialTag).Inc()
+								extendingTotalSuccessStackInitialization.WithLabelValues(projectName, stackName).Inc()
+								extendingTotalErrorStackInitialization.WithLabelValues(projectName, specialTag)
+								extendingTotalErrorStackInitialization.WithLabelValues(projectName, stackName)
 							}
 						case "error":
-							extendingTotalStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-							extendingTotalStackBootstrap.WithLabelValues(projectName, stackName).Inc()
-
-							extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-							extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackName).Inc()
+							extendingTotalStackInitializations.WithLabelValues(projectName, specialTag).Inc()
+							extendingTotalStackInitializations.WithLabelValues(projectName, stackName).Inc()
+							extendingTotalSuccessStackInitialization.WithLabelValues(projectName, specialTag)
+							extendingTotalSuccessStackInitialization.WithLabelValues(projectName, stackName)
+							extendingTotalErrorStackInitialization.WithLabelValues(projectName, specialTag).Inc()
+							extendingTotalErrorStackInitialization.WithLabelValues(projectName, stackName).Inc()
 						}
 
 						servicesAddress := cattleURL + "/stacks/" + stackId + "/services?limit=100&sort=id"
@@ -594,29 +682,47 @@ func (r *rancherExporter) collectingExtending() {
 										serviceHealthState, _ := jsonparser.GetString(serviceBytes, "healthState")
 										serviceState, _ := jsonparser.GetString(serviceBytes, "state")
 
+										extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag)
+										extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag)
+										extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceName)
+										extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+										extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
+										extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceName)
+										extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+										extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
+										extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceName)
+
 										switch serviceState {
 										case "active":
-											extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
-											extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
-											extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceName).Inc()
+											extendingTotalServiceInitializations.WithLabelValues(projectName, specialTag, specialTag).Inc()
+											extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, specialTag).Inc()
+											extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, serviceName).Inc()
 
 											if serviceHealthState == "unhealthy" {
-												extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
-												extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
-												extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceName).Inc()
+												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, specialTag, specialTag)
+												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, specialTag)
+												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, serviceName)
+												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, specialTag, specialTag).Inc()
+												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, specialTag).Inc()
+												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, serviceName).Inc()
 											} else if serviceHealthState == "healthy" {
-												extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
-												extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
-												extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceName).Inc()
+												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, specialTag, specialTag).Inc()
+												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, specialTag).Inc()
+												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, serviceName).Inc()
+												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, specialTag, specialTag)
+												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, specialTag)
+												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, serviceName)
 											}
 										case "error":
-											extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
-											extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
-											extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceName).Inc()
-
-											extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
-											extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
-											extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceName).Inc()
+											extendingTotalServiceInitializations.WithLabelValues(projectName, specialTag, specialTag).Inc()
+											extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, specialTag).Inc()
+											extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, serviceName).Inc()
+											extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, specialTag, specialTag)
+											extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, specialTag)
+											extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, serviceName)
+											extendingTotalErrorServiceInitialization.WithLabelValues(projectName, specialTag, specialTag).Inc()
+											extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, specialTag).Inc()
+											extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, serviceName).Inc()
 										}
 
 										instancesAddress := cattleURL + "/services/" + serviceId + "/instances?limit=100&sort=id"
@@ -638,24 +744,40 @@ func (r *rancherExporter) collectingExtending() {
 													instanceFirstRunningTS, _ := jsonparser.GetInt(instanceBytes, "firstRunningTS")
 													instanceCreatedTS, _ := jsonparser.GetInt(instanceBytes, "createdTS")
 
+													extendingTotalInstanceBootstraps.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+													extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, specialTag, specialTag)
+													extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, serviceName, specialTag)
+													extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, serviceName, instanceName)
+													extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+													extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, specialTag, specialTag)
+													extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, specialTag)
+													extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, instanceName)
+													extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+													extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, stackName, specialTag, specialTag)
+													extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, specialTag)
+													extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, instanceName)
+
 													switch instanceState {
 													case "stopped":
 														fallthrough
 													case "running":
-														extendingTotalInstanceBootstraps.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
-														extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, specialTag, specialTag).Inc()
-														extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, serviceName, specialTag).Inc()
-														extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, serviceName, instanceName).Inc()
+														extendingTotalInstanceInitializations.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+														extendingTotalInstanceInitializations.WithLabelValues(projectName, stackName, specialTag, specialTag).Inc()
+														extendingTotalInstanceInitializations.WithLabelValues(projectName, stackName, serviceName, specialTag).Inc()
+														extendingTotalInstanceInitializations.WithLabelValues(projectName, stackName, serviceName, instanceName).Inc()
+														extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+														extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, stackName, specialTag, specialTag).Inc()
+														extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, specialTag).Inc()
+														extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, instanceName).Inc()
+														extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+														extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, stackName, specialTag, specialTag)
+														extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, specialTag)
+														extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, instanceName)
 
 														if instanceFirstRunningTS != 0 {
 															instanceStartupTime := instanceFirstRunningTS - instanceCreatedTS
 															extendingInstanceBootstrapMsCost.WithLabelValues(projectName, stackName, serviceName, instanceName, instanceSystem, instanceType).Set(float64(instanceStartupTime))
 														}
-
-														extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
-														extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, specialTag, specialTag).Inc()
-														extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, specialTag).Inc()
-														extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, instanceName).Inc()
 													}
 
 												}, "data")
@@ -699,10 +821,10 @@ func (r *rancherExporter) collectingExtending() {
 
 		for {
 		recall:
-			_, messageBytes, err := r.wbs.ReadMessage()
+			_, messageBytes, err := r.websocketConn.ReadMessage()
 			if err != nil {
 				glog.Warnln("reconnect websocket")
-				r.wbs = r.wbsReconnect()
+				r.websocketConn = r.recreateWebsocket()
 				goto recall
 			}
 
@@ -816,11 +938,13 @@ func (r *rancherExporter) collectingExtending() {
 						}
 					}
 				} else if stackMsg.state == "active" && stackMsg.healthState == "healthy" { // empty stack start
-					if _, ok := stackIdNameMap.Load(stackMsg.id); !ok {
+					if _, ok := stackIdNameMap.Load(stackMsg.id); ok {
+						extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+						extendingTotalStackBootstraps.WithLabelValues(projectName, stackMsg.name).Inc()
 						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
 						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
-						extendingTotalStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-						extendingTotalStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
+						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
+						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
 
 						glog.Infoln("stack [", stackMsg.name, "] bs count + 1")
 						glog.Infoln("stack [", stackMsg.name, "] bs success + 1")
@@ -828,8 +952,12 @@ func (r *rancherExporter) collectingExtending() {
 					activatingStackLoop[stackMsg.name] = 1
 				}
 			} else if _, ok := activatingStackLoop[stackMsg.name]; !ok && stackMsg.state == "activating" && stackMsg.healthState == "unhealthy" { // starting
-				extendingTotalStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-				extendingTotalStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
+				extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+				extendingTotalStackBootstraps.WithLabelValues(projectName, stackMsg.name).Inc()
+				extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag)
+				extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackMsg.name)
+				extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
+				extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
 
 				glog.Infoln("stack [", stackMsg.name, "] bs count + 1")
 				activatingStackLoop[stackMsg.name] = 0
@@ -882,6 +1010,12 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+					extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+					extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
+					extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
 
 					glog.Infoln("service [", serviceMsg.name, "] bs count + 1")
 					activatingServicesLoop[loopKey] = 0
@@ -889,6 +1023,12 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+					extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+					extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
+					extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
 
 					glog.Infoln("service [", serviceMsg.name, "] bs count + 1")
 					activatingServicesLoop[loopKey] = 0
@@ -1008,6 +1148,14 @@ func (r *rancherExporter) collectingExtending() {
 						extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
 						extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
 						extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
+						extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+						extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag)
+						extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
+						extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
+						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag)
+						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
+						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
 
 						glog.Infoln("instance [", instanceMsg.name, "] bs count + 1")
 						count := int32(0)
@@ -1066,36 +1214,29 @@ func newRancherExporter() *rancherExporter {
 		projectLinksSelf = strings.Replace(projectLinksSelf, "https://", "wss://", -1)
 	}
 
-	// create wbs
-	dialAddress := projectLinksSelf + "/subscribe?eventNames=resource.change&limit=-1&sockId=1"
-	httpHeaders := http.Header{}
-	httpHeaders.Add("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(cattleAccessKey+":"+cattleSecretKey)))
-	wbs, _, err := websocket.DefaultDialer.Dial(dialAddress, httpHeaders)
-	if err != nil {
-		panic(err)
+	wbsFactory := func() *websocket.Conn {
+		dialAddress := projectLinksSelf + "/subscribe?eventNames=resource.change&limit=-1&sockId=1"
+		httpHeaders := http.Header{}
+		httpHeaders.Add("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(cattleAccessKey+":"+cattleSecretKey)))
+		wbs, _, err := websocket.DefaultDialer.Dial(dialAddress, httpHeaders)
+		if err != nil {
+			panic(err)
+		}
+
+		return wbs
 	}
 
 	result := &rancherExporter{
-		projectName: projectName,
-		projectId:   projectId,
-
-		mutex: &sync.Mutex{},
-		wbs:   wbs,
-		wbsReconnect: func() *websocket.Conn {
-			dialAddress := projectLinksSelf + "/subscribe?eventNames=resource.change&limit=-1&sockId=1"
-			httpHeaders := http.Header{}
-			httpHeaders.Add("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(cattleAccessKey+":"+cattleSecretKey)))
-			wbs, _, err := websocket.DefaultDialer.Dial(dialAddress, httpHeaders)
-			if err != nil {
-				panic(err)
-			}
-
-			return wbs
-		},
+		projectId:     projectId,
+		projectName:   projectName,
+		mutex:         &sync.Mutex{},
+		websocketConn: wbsFactory(),
 
 		stacksBuff:    make(chan buffMsg, 16),
 		servicesBuff:  make(chan buffMsg, 16),
 		instancesBuff: make(chan buffMsg, 16),
+
+		recreateWebsocket: wbsFactory,
 	}
 
 	result.collectingExtending()

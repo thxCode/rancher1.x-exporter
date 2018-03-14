@@ -123,6 +123,59 @@ rancher_instances_bootstrap_error_total{environment_name, name, service_name, st
 
 ```
 
+### Rancher stacks initialization total
+
+```
+# HELP rancher_stacks_initialization_total Current total number of the initialization stacks in Rancher
+# TYPE rancher_stacks_initialization_total counter
+rancher_stacks_initialization_total{environment_name, name} 1
+
+# HELP rancher_stacks_initialization_success_total Current total number of the healthy and active initialization stacks in Rancher
+# TYPE rancher_stacks_initialization_success_total counter
+rancher_stacks_initialization_success_total{environment_name, name} 1
+
+# HELP rancher_stacks_initialization_error_total Current total number of the unhealthy or error initialization stacks in Rancher
+# TYPE rancher_stacks_initialization_error_total counter
+rancher_stacks_initialization_error_total{environment_name, name} 1
+
+```
+
+### Rancher services initialization total
+
+```
+# HELP rancher_services_initialization_total Current total number of the initialization services in Rancher
+# TYPE rancher_services_initialization_total counter
+rancher_services_initialization_total{environment_name, name, stack_name} 1
+
+# HELP rancher_services_initialization_success_total Current total number of the healthy and active initialization services in Rancher
+# TYPE rancher_services_initialization_success_total counter
+rancher_services_initialization_success_total{environment_name, name, stack_name} 1
+
+# HELP rancher_services_initialization_error_total Current total number of the unhealthy or error initialization services in Rancher
+# TYPE rancher_services_initialization_error_total counter
+rancher_services_initialization_error_total{environment_name, name, stack_name} 1
+
+```
+
+### Rancher instances initialization total
+
+```
+# HELP rancher_instances_initialization_total Current total number of the initialization instances in Rancher
+# TYPE rancher_instances_initialization_total counter
+rancher_instances_initialization_total{environment_name, name, service_name, stack_name} 1
+
+# HELP rancher_instances_initialization_success_total Current total number of the healthy and active initialization instances in Rancher
+# TYPE rancher_instances_initialization_success_total counter
+rancher_instances_initialization_success_total{environment_name, name, service_name, stack_name} 1
+
+# HELP rancher_instances_initialization_error_total Current total number of the unhealthy or error initialization instances in Rancher
+# TYPE rancher_instances_initialization_error_total counter
+rancher_instances_initialization_error_total{environment_name, name, service_name, stack_name} 1
+
+```
+
+
+
 ### Rancher instances bootstrap milliseconds
 
 ```
