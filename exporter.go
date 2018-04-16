@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	logger "github.com/Sirupsen/logrus"
 	"github.com/buger/jsonparser"
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/thxcode/rancher1.x-restarting-controller/pkg/utils"
 )
 
 const (
@@ -364,7 +364,7 @@ func (r *rancherExporter) syncMetrics(ch chan<- prometheus.Metric) {
 
 	defer func() {
 		if err := recover(); err != nil {
-			log.Errorln(err)
+			logger.Errorln(err)
 		}
 	}()
 
@@ -390,7 +390,7 @@ func (r *rancherExporter) syncMetrics(ch chan<- prometheus.Metric) {
 		defer gwg.Done()
 
 		if hostsRespBytes, err := hc.get(cattleURL + "/hosts"); err != nil {
-			log.Warnln(err)
+			logger.Warnln(err)
 		} else {
 			jsonparser.ArrayEach(hostsRespBytes, func(hostBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
 				hostName, _ := jsonparser.GetString(hostBytes, "name")
@@ -434,7 +434,7 @@ func (r *rancherExporter) syncMetrics(ch chan<- prometheus.Metric) {
 		stkwg := &sync.WaitGroup{}
 		for {
 			if stacksRespBytes, err := hc.get(stacksAddress); err != nil {
-				log.Errorln(stacksAddress, err)
+				logger.Errorln(stacksAddress, err)
 				break
 			} else {
 				jsonparser.ArrayEach(stacksRespBytes, func(stackBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
@@ -476,7 +476,7 @@ func (r *rancherExporter) syncMetrics(ch chan<- prometheus.Metric) {
 						svcwg := &sync.WaitGroup{}
 						for {
 							if servicesRespBytes, err := hc.get(servicesAddress); err != nil {
-								log.Errorln(servicesAddress, err)
+								logger.Errorln(servicesAddress, err)
 								break
 							} else {
 								jsonparser.ArrayEach(servicesRespBytes, func(serviceBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
@@ -519,7 +519,7 @@ func (r *rancherExporter) syncMetrics(ch chan<- prometheus.Metric) {
 
 										for {
 											if instancesRespBytes, err := hc.get(instancesAddress); err != nil {
-												log.Errorln(instancesAddress, err)
+												logger.Errorln(instancesAddress, err)
 												break
 											} else {
 												jsonparser.ArrayEach(instancesRespBytes, func(instanceBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
@@ -592,238 +592,236 @@ func (r *rancherExporter) syncMetrics(ch chan<- prometheus.Metric) {
 }
 
 func (r *rancherExporter) collectingExtending() {
-	glog := utils.GetGlobalLogger()
-
 	projectId := r.projectId
 	projectName := r.projectName
 
 	stackIdNameMap := &sync.Map{}
 
-	go func() {
+	hc := newHttpClient(30 * time.Second)
+	stacksAddress := cattleURL + "/projects/" + projectId + "/stacks?limit=100&sort=id"
+	if hideSys {
+		stacksAddress += "&system=false"
+	}
 
-		hc := newHttpClient(30 * time.Second)
-		stacksAddress := cattleURL + "/projects/" + projectId + "/stacks?limit=100&sort=id"
-		if hideSys {
-			stacksAddress += "&system=false"
-		}
+	stkwg := &sync.WaitGroup{}
+	for {
+		if stacksRespBytes, err := hc.get(stacksAddress); err != nil {
+			logger.Errorln(stacksAddress, err)
+			break
+		} else {
+			jsonparser.ArrayEach(stacksRespBytes, func(stackBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
 
-		stkwg := &sync.WaitGroup{}
-		for {
-			if stacksRespBytes, err := hc.get(stacksAddress); err != nil {
-				log.Errorln(stacksAddress, err)
-				break
-			} else {
-				jsonparser.ArrayEach(stacksRespBytes, func(stackBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
+				stkwg.Add(1)
+				go func() {
+					defer stkwg.Done()
 
-					stkwg.Add(1)
-					go func() {
-						defer stkwg.Done()
+					stackId, _ := jsonparser.GetString(stackBytes, "id")
+					stackName, _ := jsonparser.GetString(stackBytes, "name")
+					stackHealthState, _ := jsonparser.GetString(stackBytes, "healthState")
+					stackState, _ := jsonparser.GetString(stackBytes, "state")
 
-						stackId, _ := jsonparser.GetString(stackBytes, "id")
-						stackName, _ := jsonparser.GetString(stackBytes, "name")
-						stackHealthState, _ := jsonparser.GetString(stackBytes, "healthState")
-						stackState, _ := jsonparser.GetString(stackBytes, "state")
+					stackIdNameMap.Store(stackId, stackName)
 
-						stackIdNameMap.Store(stackId, stackName)
+					// init bootstrap
+					extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag)
+					extendingTotalStackBootstraps.WithLabelValues(projectName, stackName)
+					extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag)
+					extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackName)
+					extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
+					extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackName)
 
-						// init bootstrap
-						extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag)
-						extendingTotalStackBootstraps.WithLabelValues(projectName, stackName)
-						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag)
-						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackName)
-						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
-						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackName)
-
-						switch stackState {
-						case "active":
-							if stackHealthState == "unhealthy" {
-								extendingTotalStackInitializations.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalStackInitializations.WithLabelValues(projectName, stackName).Inc()
-								extendingTotalSuccessStackInitialization.WithLabelValues(projectName, specialTag)
-								extendingTotalSuccessStackInitialization.WithLabelValues(projectName, stackName)
-								extendingTotalErrorStackInitialization.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalErrorStackInitialization.WithLabelValues(projectName, stackName).Inc()
-							} else if stackHealthState == "healthy" {
-								extendingTotalStackInitializations.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalStackInitializations.WithLabelValues(projectName, stackName).Inc()
-								extendingTotalSuccessStackInitialization.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalSuccessStackInitialization.WithLabelValues(projectName, stackName).Inc()
-								extendingTotalErrorStackInitialization.WithLabelValues(projectName, specialTag)
-								extendingTotalErrorStackInitialization.WithLabelValues(projectName, stackName)
-							}
-						case "error":
+					switch stackState {
+					case "active":
+						if stackHealthState == "unhealthy" {
 							extendingTotalStackInitializations.WithLabelValues(projectName, specialTag).Inc()
 							extendingTotalStackInitializations.WithLabelValues(projectName, stackName).Inc()
 							extendingTotalSuccessStackInitialization.WithLabelValues(projectName, specialTag)
 							extendingTotalSuccessStackInitialization.WithLabelValues(projectName, stackName)
 							extendingTotalErrorStackInitialization.WithLabelValues(projectName, specialTag).Inc()
 							extendingTotalErrorStackInitialization.WithLabelValues(projectName, stackName).Inc()
+						} else if stackHealthState == "healthy" {
+							extendingTotalStackInitializations.WithLabelValues(projectName, specialTag).Inc()
+							extendingTotalStackInitializations.WithLabelValues(projectName, stackName).Inc()
+							extendingTotalSuccessStackInitialization.WithLabelValues(projectName, specialTag).Inc()
+							extendingTotalSuccessStackInitialization.WithLabelValues(projectName, stackName).Inc()
+							extendingTotalErrorStackInitialization.WithLabelValues(projectName, specialTag)
+							extendingTotalErrorStackInitialization.WithLabelValues(projectName, stackName)
 						}
+					case "error":
+						extendingTotalStackInitializations.WithLabelValues(projectName, specialTag).Inc()
+						extendingTotalStackInitializations.WithLabelValues(projectName, stackName).Inc()
+						extendingTotalSuccessStackInitialization.WithLabelValues(projectName, specialTag)
+						extendingTotalSuccessStackInitialization.WithLabelValues(projectName, stackName)
+						extendingTotalErrorStackInitialization.WithLabelValues(projectName, specialTag).Inc()
+						extendingTotalErrorStackInitialization.WithLabelValues(projectName, stackName).Inc()
+					}
 
-						servicesAddress := cattleURL + "/stacks/" + stackId + "/services?limit=100&sort=id"
-						if hideSys {
-							servicesAddress += "&system=false"
-						}
+					servicesAddress := cattleURL + "/stacks/" + stackId + "/services?limit=100&sort=id"
+					if hideSys {
+						servicesAddress += "&system=false"
+					}
 
-						svcwg := &sync.WaitGroup{}
-						for {
-							if servicesRespBytes, err := hc.get(servicesAddress); err != nil {
-								log.Errorln(servicesAddress, err)
-								break
-							} else {
-								jsonparser.ArrayEach(servicesRespBytes, func(serviceBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
+					svcwg := &sync.WaitGroup{}
+					for {
+						if servicesRespBytes, err := hc.get(servicesAddress); err != nil {
+							logger.Errorln(servicesAddress, err)
+							break
+						} else {
+							jsonparser.ArrayEach(servicesRespBytes, func(serviceBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
 
-									svcwg.Add(1)
-									go func() {
-										defer svcwg.Done()
+								svcwg.Add(1)
+								go func() {
+									defer svcwg.Done()
 
-										serviceId, _ := jsonparser.GetString(serviceBytes, "id")
-										serviceName, _ := jsonparser.GetString(serviceBytes, "name")
-										serviceHealthState, _ := jsonparser.GetString(serviceBytes, "healthState")
-										serviceState, _ := jsonparser.GetString(serviceBytes, "state")
+									serviceId, _ := jsonparser.GetString(serviceBytes, "id")
+									serviceName, _ := jsonparser.GetString(serviceBytes, "name")
+									serviceHealthState, _ := jsonparser.GetString(serviceBytes, "healthState")
+									serviceState, _ := jsonparser.GetString(serviceBytes, "state")
 
-										extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag)
-										extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag)
-										extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceName)
-										extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
-										extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
-										extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceName)
-										extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
-										extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
-										extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceName)
+									extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag)
+									extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag)
+									extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceName)
+									extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+									extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
+									extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceName)
+									extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+									extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
+									extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceName)
 
-										switch serviceState {
-										case "active":
-											extendingTotalServiceInitializations.WithLabelValues(projectName, specialTag, specialTag).Inc()
-											extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, specialTag).Inc()
-											extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, serviceName).Inc()
+									switch serviceState {
+									case "active":
+										extendingTotalServiceInitializations.WithLabelValues(projectName, specialTag, specialTag).Inc()
+										extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, specialTag).Inc()
+										extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, serviceName).Inc()
 
-											if serviceHealthState == "unhealthy" {
-												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, specialTag, specialTag)
-												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, specialTag)
-												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, serviceName)
-												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, specialTag, specialTag).Inc()
-												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, specialTag).Inc()
-												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, serviceName).Inc()
-											} else if serviceHealthState == "healthy" {
-												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, specialTag, specialTag).Inc()
-												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, specialTag).Inc()
-												extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, serviceName).Inc()
-												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, specialTag, specialTag)
-												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, specialTag)
-												extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, serviceName)
-											}
-										case "error":
-											extendingTotalServiceInitializations.WithLabelValues(projectName, specialTag, specialTag).Inc()
-											extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, specialTag).Inc()
-											extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, serviceName).Inc()
+										if serviceHealthState == "unhealthy" {
 											extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, specialTag, specialTag)
 											extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, specialTag)
 											extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, serviceName)
 											extendingTotalErrorServiceInitialization.WithLabelValues(projectName, specialTag, specialTag).Inc()
 											extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, specialTag).Inc()
 											extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, serviceName).Inc()
+										} else if serviceHealthState == "healthy" {
+											extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, specialTag, specialTag).Inc()
+											extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, specialTag).Inc()
+											extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, serviceName).Inc()
+											extendingTotalErrorServiceInitialization.WithLabelValues(projectName, specialTag, specialTag)
+											extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, specialTag)
+											extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, serviceName)
 										}
+									case "error":
+										extendingTotalServiceInitializations.WithLabelValues(projectName, specialTag, specialTag).Inc()
+										extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, specialTag).Inc()
+										extendingTotalServiceInitializations.WithLabelValues(projectName, stackName, serviceName).Inc()
+										extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, specialTag, specialTag)
+										extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, specialTag)
+										extendingTotalSuccessServiceInitialization.WithLabelValues(projectName, stackName, serviceName)
+										extendingTotalErrorServiceInitialization.WithLabelValues(projectName, specialTag, specialTag).Inc()
+										extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, specialTag).Inc()
+										extendingTotalErrorServiceInitialization.WithLabelValues(projectName, stackName, serviceName).Inc()
+									}
 
-										instancesAddress := cattleURL + "/services/" + serviceId + "/instances?limit=100&sort=id"
-										if hideSys {
-											instancesAddress += "&system=false"
-										}
+									instancesAddress := cattleURL + "/services/" + serviceId + "/instances?limit=100&sort=id"
+									if hideSys {
+										instancesAddress += "&system=false"
+									}
 
-										for {
-											if instancesRespBytes, err := hc.get(instancesAddress); err != nil {
-												log.Errorln(instancesAddress, err)
-												break
-											} else {
-												jsonparser.ArrayEach(instancesRespBytes, func(instanceBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
+									for {
+										if instancesRespBytes, err := hc.get(instancesAddress); err != nil {
+											logger.Errorln(instancesAddress, err)
+											break
+										} else {
+											jsonparser.ArrayEach(instancesRespBytes, func(instanceBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
 
-													instanceName, _ := jsonparser.GetString(instanceBytes, "name")
-													instanceSystem, _ := jsonparser.GetUnsafeString(instanceBytes, "system")
-													instanceType, _ := jsonparser.GetString(instanceBytes, "type")
-													instanceState, _ := jsonparser.GetString(instanceBytes, "state")
-													instanceFirstRunningTS, _ := jsonparser.GetInt(instanceBytes, "firstRunningTS")
-													instanceCreatedTS, _ := jsonparser.GetInt(instanceBytes, "createdTS")
+												instanceName, _ := jsonparser.GetString(instanceBytes, "name")
+												instanceSystem, _ := jsonparser.GetUnsafeString(instanceBytes, "system")
+												instanceType, _ := jsonparser.GetString(instanceBytes, "type")
+												instanceState, _ := jsonparser.GetString(instanceBytes, "state")
+												instanceFirstRunningTS, _ := jsonparser.GetInt(instanceBytes, "firstRunningTS")
+												instanceCreatedTS, _ := jsonparser.GetInt(instanceBytes, "createdTS")
 
-													extendingTotalInstanceBootstraps.WithLabelValues(projectName, specialTag, specialTag, specialTag)
-													extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, specialTag, specialTag)
-													extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, serviceName, specialTag)
-													extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, serviceName, instanceName)
-													extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
-													extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, specialTag, specialTag)
-													extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, specialTag)
-													extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, instanceName)
-													extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
-													extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, stackName, specialTag, specialTag)
-													extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, specialTag)
-													extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, instanceName)
+												extendingTotalInstanceBootstraps.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+												extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, specialTag, specialTag)
+												extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, serviceName, specialTag)
+												extendingTotalInstanceBootstraps.WithLabelValues(projectName, stackName, serviceName, instanceName)
+												extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+												extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, specialTag, specialTag)
+												extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, specialTag)
+												extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, instanceName)
+												extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+												extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, stackName, specialTag, specialTag)
+												extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, specialTag)
+												extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, stackName, serviceName, instanceName)
 
-													switch instanceState {
-													case "stopped":
-														fallthrough
-													case "running":
-														extendingTotalInstanceInitializations.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
-														extendingTotalInstanceInitializations.WithLabelValues(projectName, stackName, specialTag, specialTag).Inc()
-														extendingTotalInstanceInitializations.WithLabelValues(projectName, stackName, serviceName, specialTag).Inc()
-														extendingTotalInstanceInitializations.WithLabelValues(projectName, stackName, serviceName, instanceName).Inc()
-														extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
-														extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, stackName, specialTag, specialTag).Inc()
-														extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, specialTag).Inc()
-														extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, instanceName).Inc()
-														extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, specialTag, specialTag, specialTag)
-														extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, stackName, specialTag, specialTag)
-														extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, specialTag)
-														extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, instanceName)
+												switch instanceState {
+												case "stopped":
+													fallthrough
+												case "running":
+													extendingTotalInstanceInitializations.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+													extendingTotalInstanceInitializations.WithLabelValues(projectName, stackName, specialTag, specialTag).Inc()
+													extendingTotalInstanceInitializations.WithLabelValues(projectName, stackName, serviceName, specialTag).Inc()
+													extendingTotalInstanceInitializations.WithLabelValues(projectName, stackName, serviceName, instanceName).Inc()
+													extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+													extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, stackName, specialTag, specialTag).Inc()
+													extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, specialTag).Inc()
+													extendingTotalSuccessInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, instanceName).Inc()
+													extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+													extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, stackName, specialTag, specialTag)
+													extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, specialTag)
+													extendingTotalErrorInstanceInitialization.WithLabelValues(projectName, stackName, serviceName, instanceName)
 
-														if instanceFirstRunningTS != 0 {
-															instanceStartupTime := instanceFirstRunningTS - instanceCreatedTS
-															extendingInstanceBootstrapMsCost.WithLabelValues(projectName, stackName, serviceName, instanceName, instanceSystem, instanceType).Set(float64(instanceStartupTime))
-														}
+													if instanceFirstRunningTS != 0 {
+														instanceStartupTime := instanceFirstRunningTS - instanceCreatedTS
+														extendingInstanceBootstrapMsCost.WithLabelValues(projectName, stackName, serviceName, instanceName, instanceSystem, instanceType).Set(float64(instanceStartupTime))
 													}
-
-												}, "data")
-
-												if next, _ := jsonparser.GetString(instancesRespBytes, "pagination", "next"); len(next) == 0 {
-													break
-												} else {
-													instancesAddress = next
 												}
 
+											}, "data")
+
+											if next, _ := jsonparser.GetString(instancesRespBytes, "pagination", "next"); len(next) == 0 {
+												break
+											} else {
+												instancesAddress = next
 											}
 
 										}
 
-									}()
+									}
 
-								}, "data")
+								}()
 
-								if next, _ := jsonparser.GetString(servicesRespBytes, "pagination", "next"); len(next) == 0 {
-									break
-								} else {
-									servicesAddress = next
-								}
+							}, "data")
+
+							if next, _ := jsonparser.GetString(servicesRespBytes, "pagination", "next"); len(next) == 0 {
+								break
+							} else {
+								servicesAddress = next
 							}
-
 						}
-						svcwg.Wait()
 
-					}()
+					}
+					svcwg.Wait()
 
-				}, "data")
+				}()
 
-				if next, _ := jsonparser.GetString(stacksRespBytes, "pagination", "next"); len(next) == 0 {
-					break
-				} else {
-					stacksAddress = next
-				}
+			}, "data")
+
+			if next, _ := jsonparser.GetString(stacksRespBytes, "pagination", "next"); len(next) == 0 {
+				break
+			} else {
+				stacksAddress = next
 			}
 		}
-		stkwg.Wait()
+	}
+	stkwg.Wait()
 
+	// event watcher
+	go func() {
 		for {
 		recall:
 			_, messageBytes, err := r.websocketConn.ReadMessage()
 			if err != nil {
-				glog.Warnln("reconnect websocket")
+				logger.Warnln("reconnect websocket")
 				r.websocketConn = r.recreateWebsocket()
 				goto recall
 			}
@@ -831,7 +829,7 @@ func (r *rancherExporter) collectingExtending() {
 			if resourceType, _ := jsonparser.GetString(messageBytes, "resourceType"); len(resourceType) != 0 {
 				resourceBytes, _, _, err := jsonparser.Get(messageBytes, "data", "resource")
 				if err != nil {
-					glog.Warnln(err)
+					logger.Warnln(err)
 					continue
 				}
 
@@ -901,8 +899,13 @@ func (r *rancherExporter) collectingExtending() {
 
 	}()
 
+	// stack event handler
 	go func() {
-		activatingStackLoop := make(map[string]int32, 16)
+		activatingStackLoop := make(map[string]int32)
+		stackIdNameMap.Range(func(key, value interface{}) bool {
+			activatingStackLoop[value.(string)] = 1
+			return true
+		})
 
 		for stackMsg := range r.stacksBuff {
 			if stackMsg.state == "removed" {
@@ -916,20 +919,20 @@ func (r *rancherExporter) collectingExtending() {
 								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
 								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
 
-								glog.Infoln("stack [", stackMsg.name, "] bs success + 1")
+								logger.Infoln("stack [", stackMsg.name, "] bs success + 1")
 								activatingStackLoop[stackMsg.name] = 1
 							} else if stackMsg.healthState == "unhealthy" {
 								extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
 								extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
 
-								glog.Infoln("stack [", stackMsg.name, "] bs error + 1")
+								logger.Infoln("stack [", stackMsg.name, "] bs error + 1")
 								activatingStackLoop[stackMsg.name] = 1
 							}
 						} else if stackMsg.state == "error" {
 							extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
 							extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
 
-							glog.Infoln("stack [", stackMsg.name, "] bs error + 1")
+							logger.Infoln("stack [", stackMsg.name, "] bs error + 1")
 							activatingStackLoop[stackMsg.name] = 1
 						}
 					} else {
@@ -946,8 +949,8 @@ func (r *rancherExporter) collectingExtending() {
 						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
 						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
 
-						glog.Infoln("stack [", stackMsg.name, "] bs count + 1")
-						glog.Infoln("stack [", stackMsg.name, "] bs success + 1")
+						logger.Infoln("stack [", stackMsg.name, "] bs count + 1")
+						logger.Infoln("stack [", stackMsg.name, "] bs success + 1")
 					}
 					activatingStackLoop[stackMsg.name] = 1
 				}
@@ -959,14 +962,15 @@ func (r *rancherExporter) collectingExtending() {
 				extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
 				extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
 
-				glog.Infoln("stack [", stackMsg.name, "] bs count + 1")
+				logger.Infoln("stack [", stackMsg.name, "] bs count + 1")
 				activatingStackLoop[stackMsg.name] = 0
 			}
 		}
 	}()
 
+	// service event handler
 	go func() {
-		activatingServicesLoop := make(map[string]int32, 32)
+		activatingServicesLoop := make(map[string]int32)
 
 		for serviceMsg := range r.servicesBuff {
 			stackName := serviceMsg.stackName
@@ -983,14 +987,14 @@ func (r *rancherExporter) collectingExtending() {
 								extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
 								extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-								glog.Infoln("service [", serviceMsg.name, "] bs success + 1")
+								logger.Infoln("service [", serviceMsg.name, "] bs success + 1")
 								activatingServicesLoop[loopKey] = 1
 							} else if serviceMsg.healthState == "unhealthy" { // unhealthy start
 								extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
 								extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
 								extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-								glog.Infoln("service [", serviceMsg.name, "] bs error + 1")
+								logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
 								activatingServicesLoop[loopKey] = 1
 							}
 						} else if serviceMsg.state == "error" { // error start
@@ -998,7 +1002,7 @@ func (r *rancherExporter) collectingExtending() {
 							extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
 							extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-							glog.Infoln("service [", serviceMsg.name, "] bs error + 1")
+							logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
 							activatingServicesLoop[loopKey] = 1
 						}
 					} else if looping == 1 && serviceMsg.state == "inactive" {
@@ -1017,7 +1021,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
 
-					glog.Infoln("service [", serviceMsg.name, "] bs count + 1")
+					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
 					activatingServicesLoop[loopKey] = 0
 				} else if serviceMsg.state == "restarting" && serviceMsg.healthState == "healthy" {
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
@@ -1030,7 +1034,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
 
-					glog.Infoln("service [", serviceMsg.name, "] bs count + 1")
+					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
 					activatingServicesLoop[loopKey] = 0
 				}
 			} else {
@@ -1039,20 +1043,21 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-					glog.Infoln("service [", serviceMsg.name, "] bs error + 1")
+					logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
 					activatingServicesLoop[loopKey] = -1
 				} else if looping == 1 && serviceMsg.state == "restarting" && serviceMsg.healthState == "healthy" { // [restarting] -> count bs 1
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-					glog.Infoln("service [", serviceMsg.name, "] bs count + 1")
+					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
 					activatingServicesLoop[loopKey] = 0
 				}
 			}
 		}
 	}()
 
+	// instance event handler
 	go func() {
 		activatingInstancesLoop := &sync.Map{}
 
@@ -1086,7 +1091,7 @@ func (r *rancherExporter) collectingExtending() {
 												extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
 												extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
 
-												glog.Infoln("instance running [", instanceMsg.name, "] bs success + 1")
+												logger.Infoln("instance running [", instanceMsg.name, "] bs success + 1")
 												activatingInstancesLoop.Delete(instanceMsg.name)
 											}
 										}
@@ -1100,7 +1105,7 @@ func (r *rancherExporter) collectingExtending() {
 							extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
 							extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
 
-							glog.Infoln("instance [", instanceMsg.name, "] bs success + 1")
+							logger.Infoln("instance [", instanceMsg.name, "] bs success + 1")
 							activatingInstancesLoop.Delete(instanceMsg.name)
 						} else if instanceMsg.healthState == "unhealthy" {
 							extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
@@ -1108,7 +1113,7 @@ func (r *rancherExporter) collectingExtending() {
 							extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
 							extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
 
-							glog.Infoln("instance [", instanceMsg.name, "] bs error + 1")
+							logger.Infoln("instance [", instanceMsg.name, "] bs error + 1")
 							activatingInstancesLoop.Delete(instanceMsg.name)
 						}
 					} else if instanceMsg.state == "stopped" && atomic.CompareAndSwapInt32(countPtr.(*int32), 1, 3) {
@@ -1131,7 +1136,7 @@ func (r *rancherExporter) collectingExtending() {
 											extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
 											extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
 
-											glog.Infoln("instance stopped [", instanceMsg.name, "] bs success + 1")
+											logger.Infoln("instance stopped [", instanceMsg.name, "] bs success + 1")
 											activatingInstancesLoop.Delete(instanceMsg.name)
 										}
 									}
@@ -1157,7 +1162,7 @@ func (r *rancherExporter) collectingExtending() {
 						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
 						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
 
-						glog.Infoln("instance [", instanceMsg.name, "] bs count + 1")
+						logger.Infoln("instance [", instanceMsg.name, "] bs count + 1")
 						count := int32(0)
 						activatingInstancesLoop.Store(instanceMsg.name, &count)
 					}
@@ -1170,7 +1175,7 @@ func (r *rancherExporter) collectingExtending() {
 						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
 						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
 
-						glog.Infoln("instance [", instanceMsg.name, "] bs error + 1")
+						logger.Infoln("instance [", instanceMsg.name, "] bs error + 1")
 						activatingInstancesLoop.Delete(instanceMsg.name)
 					}
 				}
@@ -1232,9 +1237,9 @@ func newRancherExporter() *rancherExporter {
 		mutex:         &sync.Mutex{},
 		websocketConn: wbsFactory(),
 
-		stacksBuff:    make(chan buffMsg, 16),
-		servicesBuff:  make(chan buffMsg, 16),
-		instancesBuff: make(chan buffMsg, 16),
+		stacksBuff:    make(chan buffMsg, 1024),
+		servicesBuff:  make(chan buffMsg, 1024),
+		instancesBuff: make(chan buffMsg, 1024),
 
 		recreateWebsocket: wbsFactory,
 	}

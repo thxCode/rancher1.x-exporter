@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Sirupsen/logrus"
+	logger "github.com/Sirupsen/logrus"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/version"
@@ -20,14 +20,12 @@ var (
 	cattleAccessKey string
 	cattleSecretKey string
 	hideSys         bool
-
-	log = logrus.New()
 )
 
 func main() {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Error(err)
+			logger.Error(err)
 		}
 	}()
 
@@ -94,15 +92,15 @@ func appAction(c *cli.Context) {
 	// set logger
 	switch c.String("log_level") {
 	case "debug":
-		log.Level = logrus.DebugLevel
+		logger.SetLevel(logger.DebugLevel)
 	case "warn":
-		log.Level = logrus.WarnLevel
+		logger.SetLevel(logger.WarnLevel)
 	case "fatal":
-		log.Level = logrus.FatalLevel
+		logger.SetLevel(logger.FatalLevel)
 	case "panic":
-		log.Level = logrus.PanicLevel
+		logger.SetLevel(logger.PanicLevel)
 	default:
-		log.Level = logrus.InfoLevel
+		logger.SetLevel(logger.InfoLevel)
 	}
 
 	// cattle url
@@ -116,8 +114,8 @@ func appAction(c *cli.Context) {
 		}
 	}
 
-	log.Infoln("Starting rancher_exporter", version.Info(), ", with cattle URL: ", cattleURL, ", access key: ", cattleAccessKey, ", system services hidden: ", hideSys)
-	log.Infoln("Build context", version.BuildContext())
+	logger.Infoln("Starting rancher_exporter", version.Info(), ", with cattle URL: ", cattleURL, ", access key: ", cattleAccessKey, ", system services hidden: ", hideSys)
+	logger.Infoln("Build context", version.BuildContext())
 
 	re := newRancherExporter()
 
@@ -126,7 +124,7 @@ func appAction(c *cli.Context) {
 	prometheus.MustRegister(version.NewCollector("rancher_exporter"))
 
 	// start web
-	log.Infoln("Listening on", listenAddress)
+	logger.Infoln("Listening on", listenAddress)
 	http.Handle(metricPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
@@ -137,7 +135,7 @@ func appAction(c *cli.Context) {
              </body>
              </html>`))
 	})
-	log.Fatal(http.ListenAndServe(listenAddress, nil))
+	logger.Fatal(http.ListenAndServe(listenAddress, nil))
 
 	re.Stop()
 }
