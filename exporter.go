@@ -257,6 +257,7 @@ func newHttpClient(timeoutSeconds time.Duration) *httpClient {
 
 type buffMsg struct {
 	id            string
+	parentId      string
 	name          string
 	state         string
 	healthState   string
@@ -852,6 +853,7 @@ func (r *rancherExporter) collectingExtending() {
 						transitioning: transitioning,
 					}
 				case "service":
+					id, _ := jsonparser.GetString(resourceBytes, "id")
 					stackId, _ := jsonparser.GetString(resourceBytes, "stackId")
 					name, _ := jsonparser.GetString(resourceBytes, "name")
 					state, _ := jsonparser.GetString(resourceBytes, "state")
@@ -870,6 +872,8 @@ func (r *rancherExporter) collectingExtending() {
 					}
 
 					r.servicesBuff <- buffMsg{
+						id:            id,
+						parentId:      stackId,
 						name:          name,
 						state:         state,
 						healthState:   healthState,
@@ -877,15 +881,19 @@ func (r *rancherExporter) collectingExtending() {
 						stackName:     stackName,
 					}
 				case "instance":
+					id, _ := jsonparser.GetString(resourceBytes, "id")
 					name, _ := jsonparser.GetString(resourceBytes, "name")
 					state, _ := jsonparser.GetString(resourceBytes, "state")
 					healthState, _ := jsonparser.GetString(resourceBytes, "healthState")
 					transitioning, _ := jsonparser.GetString(resourceBytes, "transitioning")
 					labelStackServiceName, _ := jsonparser.GetString(resourceBytes, "labels", "io.rancher.stack_service.name")
+					serviceId, _ := jsonparser.GetString(resourceBytes, "serviceIds", "[0]")
 
 					labelStackServiceNameSplit := strings.Split(labelStackServiceName, "/")
 
 					r.instancesBuff <- buffMsg{
+						id:            id,
+						parentId:      serviceId,
 						name:          name,
 						state:         state,
 						healthState:   healthState,
@@ -901,116 +909,132 @@ func (r *rancherExporter) collectingExtending() {
 
 	// stack event handler
 	go func() {
-		activatingStackLoop := make(map[string]int32)
+		activatingStackLoop := &sync.Map{}
+
+		const (
+			activating int64 = iota
+			active
+			inactive
+		)
+
 		stackIdNameMap.Range(func(key, value interface{}) bool {
-			activatingStackLoop[value.(string)] = 1
+			count := active
+			activatingStackLoop.Store(value.(string), &count)
 			return true
 		})
 
 		for stackMsg := range r.stacksBuff {
-			if stackMsg.state == "removed" {
-				stackIdNameMap.Delete(stackMsg.id)
-				delete(activatingStackLoop, stackMsg.name)
-			} else if stackMsg.transitioning == "no" {
-				if looping, ok := activatingStackLoop[stackMsg.name]; ok {
-					if looping == 0 {
-						if stackMsg.state == "active" {
-							if stackMsg.healthState == "healthy" {
-								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
+			logger.Debugf("[[stack   ]]: %+v", stackMsg)
 
-								logger.Infoln("stack [", stackMsg.name, "] bs success + 1")
-								activatingStackLoop[stackMsg.name] = 1
-							} else if stackMsg.healthState == "unhealthy" {
-								extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
+			switch stackMsg.state {
+			case "activating":
+				_, exist := activatingStackLoop.Load(stackMsg.name)
+				if !exist {
+					extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+					extendingTotalStackBootstraps.WithLabelValues(projectName, stackMsg.name).Inc()
+					extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag)
+					extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackMsg.name)
+					extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
+					extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
 
-								logger.Infoln("stack [", stackMsg.name, "] bs error + 1")
-								activatingStackLoop[stackMsg.name] = 1
+					logger.Infoln("stack [", stackMsg.name, "] bs count + 1")
+					count := activating
+					activatingStackLoop.Store(stackMsg.name, &count)
+				}
+			case "active":
+				countPtr, exist := activatingStackLoop.Load(stackMsg.name)
+				if !exist {
+					count := activating
+					countPtr = &count
+					activatingStackLoop.Store(stackMsg.name, countPtr)
+
+					extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+					extendingTotalStackBootstraps.WithLabelValues(projectName, stackMsg.name).Inc()
+					extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag)
+					extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackMsg.name)
+					extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
+					extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
+
+					logger.Infoln("stack [", stackMsg.name, "] bs count + 1")
+				}
+
+				if stackMsg.healthState == "unhealthy" {
+					// if one service isn't degraded
+					isSomeServiceDegraded := false
+					hc := newHttpClient(10 * time.Second)
+					if servicesRespBytes, err := hc.get(cattleURL + "/stacks/" + stackMsg.id + "/services"); err == nil {
+						jsonparser.ArrayEach(servicesRespBytes, func(serviceRespBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
+							healthState, _ := jsonparser.GetString(serviceRespBytes, "healthState")
+							if healthState == "degraded" {
+								isSomeServiceDegraded = true
+								// todo break
 							}
-						} else if stackMsg.state == "error" {
-							extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-							extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
-
-							logger.Infoln("stack [", stackMsg.name, "] bs error + 1")
-							activatingStackLoop[stackMsg.name] = 1
-						}
-					} else {
-						if stackMsg.state == "active" && stackMsg.healthState == "unhealthy" { // inactive
-							delete(activatingStackLoop, stackMsg.name)
-						}
+						}, "data")
 					}
-				} else if stackMsg.state == "active" && stackMsg.healthState == "healthy" { // empty stack start
-					if _, ok := stackIdNameMap.Load(stackMsg.id); ok {
+
+					if !isSomeServiceDegraded {
+						atomic.CompareAndSwapInt64(countPtr.(*int64), active, inactive)
+					}
+				} else if stackMsg.healthState == "healthy" {
+					if atomic.CompareAndSwapInt64(countPtr.(*int64), inactive, activating) {
 						extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
 						extendingTotalStackBootstraps.WithLabelValues(projectName, stackMsg.name).Inc()
-						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
-						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
-						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
-						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
 
 						logger.Infoln("stack [", stackMsg.name, "] bs count + 1")
-						logger.Infoln("stack [", stackMsg.name, "] bs success + 1")
 					}
-					activatingStackLoop[stackMsg.name] = 1
 				}
-			} else if _, ok := activatingStackLoop[stackMsg.name]; !ok && stackMsg.state == "activating" && stackMsg.healthState == "unhealthy" { // starting
-				extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
-				extendingTotalStackBootstraps.WithLabelValues(projectName, stackMsg.name).Inc()
-				extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag)
-				extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackMsg.name)
-				extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
-				extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
 
-				logger.Infoln("stack [", stackMsg.name, "] bs count + 1")
-				activatingStackLoop[stackMsg.name] = 0
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), activating, active) {
+					if stackMsg.healthState == "healthy" {
+						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
+						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
+
+						logger.Infoln("stack [", stackMsg.name, "] bs success + 1")
+					} else if stackMsg.healthState == "unhealthy" {
+						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
+						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
+
+						logger.Infoln("stack [", stackMsg.name, "] bs error + 1")
+					}
+				}
+			case "error":
+				extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
+				extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name).Inc()
+
+				logger.Infoln("stack [", stackMsg.name, "] bs error + 1")
+			case "removed":
+				stackIdNameMap.Delete(stackMsg.id)
+				activatingStackLoop.Delete(stackMsg.name)
 			}
 		}
 	}()
 
 	// service event handler
 	go func() {
-		activatingServicesLoop := make(map[string]int32)
+		activatingServicesLoop := &sync.Map{}
+
+		const (
+			stopped         int64 = iota
+			upgrading
+			upgraded
+			rollingBack
+			canceledUpgrade
+			activating
+			restarting
+			updatingActive
+			active
+		)
 
 		for serviceMsg := range r.servicesBuff {
+			logger.Debugf("[[service ]]: %+v", serviceMsg)
+
 			stackName := serviceMsg.stackName
 			loopKey := stackName + "-" + serviceMsg.name
 
-			if serviceMsg.state == "removed" {
-				delete(activatingServicesLoop, loopKey)
-			} else if serviceMsg.transitioning == "no" {
-				if looping, ok := activatingServicesLoop[loopKey]; ok {
-					if looping <= 0 { // [active]
-						if serviceMsg.state == "active" {
-							if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" { // healthy start
-								extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
-								extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
-								extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
-
-								logger.Infoln("service [", serviceMsg.name, "] bs success + 1")
-								activatingServicesLoop[loopKey] = 1
-							} else if serviceMsg.healthState == "unhealthy" { // unhealthy start
-								extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
-								extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
-								extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
-
-								logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
-								activatingServicesLoop[loopKey] = 1
-							}
-						} else if serviceMsg.state == "error" { // error start
-							extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
-							extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
-							extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
-
-							logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
-							activatingServicesLoop[loopKey] = 1
-						}
-					} else if looping == 1 && serviceMsg.state == "inactive" {
-						delete(activatingServicesLoop, loopKey)
-					}
-				}
-			} else if looping, ok := activatingServicesLoop[loopKey]; !ok {
-				if serviceMsg.state == "activating" && serviceMsg.healthState == "healthy" { // [starting] -> count bs 1
+			switch serviceMsg.state {
+			case "activating":
+				_, exist := activatingServicesLoop.Load(loopKey)
+				if !exist {
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
@@ -1022,8 +1046,20 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
 
 					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
-					activatingServicesLoop[loopKey] = 0
-				} else if serviceMsg.state == "restarting" && serviceMsg.healthState == "healthy" {
+					count := activating
+					activatingServicesLoop.Store(loopKey, &count)
+
+					continue
+				}
+			case "upgrading":
+				countPtr, exist := activatingServicesLoop.Load(loopKey)
+				if !exist {
+					count := active
+					countPtr = &count
+					activatingServicesLoop.Store(loopKey, countPtr)
+				}
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), active, upgrading) {
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
@@ -1035,24 +1071,256 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
 
 					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
-					activatingServicesLoop[loopKey] = 0
 				}
-			} else {
-				if looping == 0 && serviceMsg.state == "updating-active" && serviceMsg.healthState == "unhealthy" { // error start
+			case "restarting":
+				countPtr, exist := activatingServicesLoop.Load(loopKey)
+				if !exist {
+					count := active
+					countPtr = &count
+					activatingServicesLoop.Store(loopKey, countPtr)
+				}
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), active, restarting) {
+					extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
+					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
+					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+					extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+					extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
+					extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
+
+					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
+				}
+			case "canceled-upgrade":
+				countPtr, exist := activatingServicesLoop.Load(loopKey)
+				if !exist {
+					continue
+				}
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), upgrading, canceledUpgrade) {
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
 					logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
-					activatingServicesLoop[loopKey] = -1
-				} else if looping == 1 && serviceMsg.state == "restarting" && serviceMsg.healthState == "healthy" { // [restarting] -> count bs 1
+				}
+			case "upgraded":
+				countPtr, exist := activatingServicesLoop.Load(loopKey)
+				if !exist {
+					continue
+				}
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), upgrading, upgraded) {
+
+					// for 1 service of 1 stack
+					if len(serviceMsg.parentId) != 0 {
+						hc := newHttpClient(10 * time.Second)
+						if servicesRespBytes, err := hc.get(cattleURL + "/stacks/" + serviceMsg.parentId + "/services"); err == nil {
+							_, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[1]")
+							if err == jsonparser.KeyPathNotFoundError {
+
+								extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+								extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
+
+								logger.Infoln("stack [", stackName, "] bs count + 1")
+
+								if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" {
+									extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
+									extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackName).Inc()
+
+									logger.Infoln("stack [", stackName, "] bs success + 1")
+								} else if serviceMsg.healthState == "unhealthy" {
+									extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
+									extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackName).Inc()
+
+									logger.Infoln("stack [", stackName, "] bs error + 1")
+								}
+							}
+						}
+					}
+
+					if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" { // healthy start
+						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
+						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+						logger.Infoln("service [", serviceMsg.name, "] bs success + 1")
+					} else if serviceMsg.healthState == "unhealthy" { // unhealthy start
+						extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+						extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
+						extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+						logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
+					}
+				}
+			case "rolling-back":
+				countPtr, exist := activatingServicesLoop.Load(loopKey)
+				if !exist {
+					continue
+				}
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), upgrading, canceledUpgrade) {
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+					logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
+				}
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), upgraded, rollingBack) ||
+					atomic.CompareAndSwapInt64(countPtr.(*int64), canceledUpgrade, rollingBack) {
+
+					// for 1 service of 1 stack
+					if len(serviceMsg.parentId) != 0 {
+						hc := newHttpClient(10 * time.Second)
+						if servicesRespBytes, err := hc.get(cattleURL + "/stacks/" + serviceMsg.parentId + "/services"); err == nil {
+							_, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[1]")
+							if err == jsonparser.KeyPathNotFoundError {
+
+								extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+								extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
+
+								logger.Infoln("stack [", stackName, "] bs count + 1")
+
+								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
+								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackName).Inc()
+
+								logger.Infoln("stack [", stackName, "] bs success + 1")
+
+							}
+						}
+					}
+
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
 					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
-					activatingServicesLoop[loopKey] = 0
+
 				}
+			case "updating-active":
+				countPtr, exist := activatingServicesLoop.Load(loopKey)
+				if !exist {
+					count := active
+					countPtr = &count
+					activatingServicesLoop.Store(loopKey, countPtr)
+				}
+
+				// if instances length only one then
+				if len(serviceMsg.id) != 0 {
+					hc := newHttpClient(10 * time.Second)
+					if instancesRespBytes, err := hc.get(cattleURL + "/services/" + serviceMsg.id + "/instances"); err == nil {
+						_, _, _, err := jsonparser.Get(instancesRespBytes, "data", "[1]")
+						if err == jsonparser.KeyPathNotFoundError {
+							if atomic.CompareAndSwapInt64(countPtr.(*int64), active, updatingActive) {
+								extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
+								extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
+								extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+								logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
+
+								// at the same time, stack must be count
+								extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+								extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
+
+								logger.Infoln("stack [", stackName, "] bs count + 1")
+
+							}
+						}
+					}
+				}
+			case "error":
+				_, exist := activatingServicesLoop.Load(loopKey)
+				if !exist {
+					continue
+				}
+
+				extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+				extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
+				extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+				logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
+				activatingServicesLoop.Delete(loopKey)
+			case "active":
+				countPtr, exist := activatingServicesLoop.Load(loopKey)
+				if !exist {
+					continue
+				}
+
+				count := atomic.LoadInt64(countPtr.(*int64))
+
+				// for 1 instance of 1 service of 1 stack
+				if count == updatingActive {
+					if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" {
+						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
+						extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackName).Inc()
+
+						logger.Infoln("stack [", stackName, "] bs success + 1")
+					} else if serviceMsg.healthState == "unhealthy" {
+						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
+						extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackName).Inc()
+
+						logger.Infoln("stack [", stackName, "] bs error + 1")
+					}
+				}
+
+				// for 1 service of 1 stack
+				if count == restarting {
+					if len(serviceMsg.parentId) != 0 {
+						hc := newHttpClient(10 * time.Second)
+						if servicesRespBytes, err := hc.get(cattleURL + "/stacks/" + serviceMsg.parentId + "/services"); err == nil {
+							_, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[1]")
+							if err == jsonparser.KeyPathNotFoundError {
+
+								extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+								extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
+
+								logger.Infoln("stack [", stackName, "] bs count + 1")
+
+								if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" {
+									extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
+									extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackName).Inc()
+
+									logger.Infoln("stack [", stackName, "] bs success + 1")
+								} else if serviceMsg.healthState == "unhealthy" {
+									extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
+									extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackName).Inc()
+
+									logger.Infoln("stack [", stackName, "] bs error + 1")
+								}
+							}
+						}
+					}
+				}
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), upgraded, active) {
+					continue
+				}
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), restarting, active) ||
+					atomic.CompareAndSwapInt64(countPtr.(*int64), activating, active) ||
+					atomic.CompareAndSwapInt64(countPtr.(*int64), rollingBack, active) ||
+					atomic.CompareAndSwapInt64(countPtr.(*int64), updatingActive, active) ||
+					atomic.CompareAndSwapInt64(countPtr.(*int64), stopped, active) {
+					if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" { // healthy start
+						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
+						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+						logger.Infoln("service [", serviceMsg.name, "] bs success + 1")
+					} else if serviceMsg.healthState == "unhealthy" { // unhealthy start
+						extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+						extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
+						extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+						logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
+					}
+
+				}
+			case "inactive", "removed":
+				activatingServicesLoop.Delete(loopKey)
 			}
 		}
 	}()
@@ -1061,45 +1329,86 @@ func (r *rancherExporter) collectingExtending() {
 	go func() {
 		activatingInstancesLoop := &sync.Map{}
 
-		runningStopChan := make(chan string, 16)
-		defer close(runningStopChan)
-
-		stoppedStopChan := make(chan string, 16)
-		defer close(stoppedStopChan)
+		const (
+			stopped  int64 = iota
+			stopping
+			starting
+			running
+		)
 
 		for instanceMsg := range r.instancesBuff {
-			if instanceMsg.state == "removed" {
-				activatingInstancesLoop.Delete(instanceMsg.name)
-			} else if instanceMsg.transitioning == "no" {
-				if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.name); ok {
-					if instanceMsg.state == "running" && atomic.CompareAndSwapInt32(countPtr.(*int32), 0, 1) {
-						if len(instanceMsg.healthState) == 0 {
-							go func(instanceMsg buffMsg) {
-								after := time.After(8 * time.Second)
+			logger.Debugf("[[instance]]: %+v", instanceMsg)
 
-								for {
-									select {
-									case stopName := <-runningStopChan:
-										if stopName == instanceMsg.name {
-											return
-										}
-									case <-after:
-										if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.name); ok {
-											if atomic.LoadInt32(countPtr.(*int32)) == 1 {
-												extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
-												extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
-												extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
-												extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
+			switch instanceMsg.state {
+			case "starting":
+				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.name)
+				if !exist {
+					count := stopping
+					countPtr = &count
+					activatingInstancesLoop.Store(instanceMsg.name, countPtr)
+				}
 
-												logger.Infoln("instance running [", instanceMsg.name, "] bs success + 1")
-												activatingInstancesLoop.Delete(instanceMsg.name)
-											}
-										}
-										return
-									}
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), stopping, starting) { // from stopping (Instance Restart)
+					extendingTotalInstanceBootstraps.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+					extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
+					extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
+					extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
+					extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+					extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag)
+					extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
+					extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag)
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
+
+					logger.Infoln("instance [", instanceMsg.name, "] bs count + 1")
+				}
+
+			case "running":
+				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.name)
+				if !exist {
+					continue
+				}
+
+				if atomic.LoadInt64(countPtr.(*int64)) == stopped { // from stopped (Service Restart)
+					extendingTotalInstanceBootstraps.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+					extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
+					extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
+					extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
+					extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+					extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag)
+					extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
+					extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag)
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
+
+					logger.Infoln("instance [", instanceMsg.name, "] bs count + 1")
+				}
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), stopped, running) ||
+					atomic.CompareAndSwapInt64(countPtr.(*int64), starting, running) {
+
+					if len(instanceMsg.healthState) == 0 { // without health check
+						go func(instanceMsg buffMsg) {
+							time.Sleep(8 * time.Second)
+
+							if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.name); ok {
+								if atomic.LoadInt64(countPtr.(*int64)) == running {
+									extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+									extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
+									extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
+									extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
+
+									logger.Infoln("instance running [", instanceMsg.name, "] bs success + 1")
+									activatingInstancesLoop.Delete(instanceMsg.name)
 								}
-							}(instanceMsg)
-						} else if instanceMsg.healthState == "healthy" {
+							}
+						}(instanceMsg)
+					} else {
+						if instanceMsg.healthState == "healthy" {
 							extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
 							extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
 							extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
@@ -1116,21 +1425,35 @@ func (r *rancherExporter) collectingExtending() {
 							logger.Infoln("instance [", instanceMsg.name, "] bs error + 1")
 							activatingInstancesLoop.Delete(instanceMsg.name)
 						}
-					} else if instanceMsg.state == "stopped" && atomic.CompareAndSwapInt32(countPtr.(*int32), 1, 3) {
-						runningStopChan <- instanceMsg.name
+					}
+				}
+			case "stopping":
+				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.name)
+				if !exist {
+					count := stopping
+					activatingInstancesLoop.Store(instanceMsg.name, &count)
+					continue
+				}
 
-						go func(instanceMsg buffMsg) {
-							after := time.After(16 * time.Second)
+				atomic.CompareAndSwapInt64(countPtr.(*int64), running, stopping)
+			case "stopped":
+				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.name)
+				if !exist {
+					continue
+				}
 
-							for {
-								select {
-								case stopName := <-stoppedStopChan:
-									if stopName == instanceMsg.name {
-										return
-									}
-								case <-after:
-									if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.name); ok {
-										if atomic.LoadInt32(countPtr.(*int32)) == 3 {
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), stopping, stopped) {
+					go func(instanceMsg buffMsg) {
+						if len(instanceMsg.parentId) != 0 {
+							time.Sleep(16 * time.Second)
+
+							if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.name); ok {
+								if atomic.LoadInt64(countPtr.(*int64)) == stopped {
+									// if service is active then
+									hc := newHttpClient(10 * time.Second)
+									if serviceRespBytes, err := hc.get(cattleURL + "/services/" + instanceMsg.parentId); err == nil {
+										state, _ := jsonparser.GetString(serviceRespBytes, "state")
+										if state == "active" || state == "upgraded" {
 											extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
 											extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
 											extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
@@ -1140,45 +1463,13 @@ func (r *rancherExporter) collectingExtending() {
 											activatingInstancesLoop.Delete(instanceMsg.name)
 										}
 									}
-									return
 								}
 							}
-						}(instanceMsg)
-					}
+						}
+					}(instanceMsg)
 				}
-			} else {
-				if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.name); !ok {
-					if instanceMsg.state == "starting" {
-						extendingTotalInstanceBootstraps.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
-						extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
-						extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
-						extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
-						extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
-						extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag)
-						extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
-						extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
-						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
-						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag)
-						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
-						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
-
-						logger.Infoln("instance [", instanceMsg.name, "] bs count + 1")
-						count := int32(0)
-						activatingInstancesLoop.Store(instanceMsg.name, &count)
-					}
-				} else if atomic.CompareAndSwapInt32(countPtr.(*int32), 3, 4) { // starting -> stopped -> starting
-					if instanceMsg.state == "starting" {
-						stoppedStopChan <- instanceMsg.name
-
-						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
-						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
-						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
-						extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
-
-						logger.Infoln("instance [", instanceMsg.name, "] bs error + 1")
-						activatingInstancesLoop.Delete(instanceMsg.name)
-					}
-				}
+			case "removed":
+				activatingInstancesLoop.Delete(instanceMsg.name)
 			}
 		}
 

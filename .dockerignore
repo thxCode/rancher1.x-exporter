@@ -3,7 +3,7 @@
 
 /.idea
 /vendor
-/.build
+/bin
 /hooks
 LICENSE
 VERSION

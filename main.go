@@ -72,7 +72,7 @@ func main() {
 			Name:   "log_level",
 			Usage:  "Set the logging level",
 			EnvVar: "LOG_LEVEL",
-			Value:  "debug",
+			Value:  "info",
 		},
 		cli.BoolFlag{
 			Name:        "hide_sys",
