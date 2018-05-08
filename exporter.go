@@ -937,7 +937,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
 					extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
 
-					logger.Infoln("stack [", stackMsg.name, "] bs count + 1")
+					logger.Infoln("stack [", stackMsg.name, ", none -> activating] bs count + 1")
 					count := activating
 					activatingStackLoop.Store(stackMsg.name, &count)
 				}
@@ -955,24 +955,28 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
 					extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
 
-					logger.Infoln("stack [", stackMsg.name, "] bs count + 1")
+					logger.Infoln("stack [", stackMsg.name, ", none -> activating] bs count + 1")
 				}
 
 				if stackMsg.healthState == "unhealthy" {
 					// if one service isn't degraded
-					isSomeServiceDegraded := false
+					isInactive := false
 					hc := newHttpClient(10 * time.Second)
 					if servicesRespBytes, err := hc.get(cattleURL + "/stacks/" + stackMsg.id + "/services"); err == nil {
-						jsonparser.ArrayEach(servicesRespBytes, func(serviceRespBytes []byte, dataType jsonparser.ValueType, offset int, err error) {
-							healthState, _ := jsonparser.GetString(serviceRespBytes, "healthState")
-							if healthState == "degraded" {
-								isSomeServiceDegraded = true
-								// todo break
+						_, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[1]")
+						if err == jsonparser.KeyPathNotFoundError {
+							serviceRespBytes, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[0]")
+							if err == nil {
+								healthState, _ := jsonparser.GetString(serviceRespBytes, "healthState")
+								state, _ := jsonparser.GetString(serviceRespBytes, "state")
+								if healthState == "degraded" || state == "restarting" || state == "upgrading" || state == "upgraded" || state == "updating-active" {
+									isInactive = true
+								}
 							}
-						}, "data")
+						}
 					}
 
-					if !isSomeServiceDegraded {
+					if !isInactive {
 						atomic.CompareAndSwapInt64(countPtr.(*int64), active, inactive)
 					}
 				} else if stackMsg.healthState == "healthy" {
@@ -980,7 +984,7 @@ func (r *rancherExporter) collectingExtending() {
 						extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
 						extendingTotalStackBootstraps.WithLabelValues(projectName, stackMsg.name).Inc()
 
-						logger.Infoln("stack [", stackMsg.name, "] bs count + 1")
+						logger.Infoln("stack [", stackMsg.name, ", inactive -> activating ] bs count + 1")
 					}
 				}
 
@@ -1045,7 +1049,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
 
-					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
+					logger.Infoln("service [", serviceMsg.name, ", none -> activating ] bs count + 1")
 					count := activating
 					activatingServicesLoop.Store(loopKey, &count)
 
@@ -1070,7 +1074,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
 
-					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
+					logger.Infoln("service [", serviceMsg.name, ", active -> upgrading ] bs count + 1")
 				}
 			case "restarting":
 				countPtr, exist := activatingServicesLoop.Load(loopKey)
@@ -1091,7 +1095,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag)
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name)
 
-					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
+					logger.Infoln("service [", serviceMsg.name, ", active -> restarting ] bs count + 1")
 				}
 			case "canceled-upgrade":
 				countPtr, exist := activatingServicesLoop.Load(loopKey)
@@ -1124,7 +1128,7 @@ func (r *rancherExporter) collectingExtending() {
 								extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
 								extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
 
-								logger.Infoln("stack [", stackName, "] bs count + 1")
+								logger.Infoln("stack [", stackName, ", svc:upgraded ] bs count + 1")
 
 								if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" {
 									extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
@@ -1166,7 +1170,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-					logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
+					logger.Infoln("service [", serviceMsg.name, ", upgrading -> canceled-upgrade ] bs error + 1")
 				}
 
 				if atomic.CompareAndSwapInt64(countPtr.(*int64), upgraded, rollingBack) ||
@@ -1182,7 +1186,7 @@ func (r *rancherExporter) collectingExtending() {
 								extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
 								extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
 
-								logger.Infoln("stack [", stackName, "] bs count + 1")
+								logger.Infoln("stack [", stackName, "svc:rolling-back ] bs count + 1")
 
 								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
 								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackName).Inc()
@@ -1197,7 +1201,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-					logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
+					logger.Infoln("service [", serviceMsg.name, "upgraded/canceled-upgrade -> rolling-back ] bs count + 1")
 
 				}
 			case "updating-active":
@@ -1210,7 +1214,7 @@ func (r *rancherExporter) collectingExtending() {
 
 				// if instances length only one then
 				if len(serviceMsg.id) != 0 {
-					hc := newHttpClient(10 * time.Second)
+					hc := newHttpClient(30 * time.Second)
 					if instancesRespBytes, err := hc.get(cattleURL + "/services/" + serviceMsg.id + "/instances"); err == nil {
 						_, _, _, err := jsonparser.Get(instancesRespBytes, "data", "[1]")
 						if err == jsonparser.KeyPathNotFoundError {
@@ -1219,14 +1223,19 @@ func (r *rancherExporter) collectingExtending() {
 								extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 								extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-								logger.Infoln("service [", serviceMsg.name, "] bs count + 1")
+								logger.Infoln("service [", serviceMsg.name, "ins:stopped ] bs count + 1")
 
-								// at the same time, stack must be count
-								extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
+								if servicesRespBytes, err := hc.get(cattleURL + "/stacks/" + serviceMsg.parentId + "/services"); err == nil {
+									_, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[1]")
+									if err == jsonparser.KeyPathNotFoundError {
 
-								logger.Infoln("stack [", stackName, "] bs count + 1")
+										extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+										extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
 
+										logger.Infoln("stack [", stackName, "ins:stopped ] bs count + 1")
+
+									}
+								}
 							}
 						}
 					}
@@ -1277,7 +1286,7 @@ func (r *rancherExporter) collectingExtending() {
 								extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
 								extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
 
-								logger.Infoln("stack [", stackName, "] bs count + 1")
+								logger.Infoln("stack [", stackName, "svc:restart ] bs count + 1")
 
 								if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" {
 									extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
@@ -1362,7 +1371,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
 					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
 
-					logger.Infoln("instance [", instanceMsg.name, "] bs count + 1")
+					logger.Infoln("instance [", instanceMsg.name, "none -> starting ] bs count + 1")
 				}
 
 			case "running":
@@ -1385,7 +1394,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
 					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
 
-					logger.Infoln("instance [", instanceMsg.name, "] bs count + 1")
+					logger.Infoln("instance [", instanceMsg.name, "stopped -> running ] bs count + 1")
 				}
 
 				if atomic.CompareAndSwapInt64(countPtr.(*int64), stopped, running) ||
@@ -1393,7 +1402,7 @@ func (r *rancherExporter) collectingExtending() {
 
 					if len(instanceMsg.healthState) == 0 { // without health check
 						go func(instanceMsg buffMsg) {
-							time.Sleep(8 * time.Second)
+							time.Sleep(5 * time.Second)
 
 							if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.name); ok {
 								if atomic.LoadInt64(countPtr.(*int64)) == running {
@@ -1430,7 +1439,7 @@ func (r *rancherExporter) collectingExtending() {
 			case "stopping":
 				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.name)
 				if !exist {
-					count := stopping
+					count := stopped
 					activatingInstancesLoop.Store(instanceMsg.name, &count)
 					continue
 				}
@@ -1439,13 +1448,15 @@ func (r *rancherExporter) collectingExtending() {
 			case "stopped":
 				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.name)
 				if !exist {
+					count := stopped
+					activatingInstancesLoop.Store(instanceMsg.name, &count)
 					continue
 				}
 
 				if atomic.CompareAndSwapInt64(countPtr.(*int64), stopping, stopped) {
 					go func(instanceMsg buffMsg) {
 						if len(instanceMsg.parentId) != 0 {
-							time.Sleep(16 * time.Second)
+							time.Sleep(10 * time.Second)
 
 							if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.name); ok {
 								if atomic.LoadInt64(countPtr.(*int64)) == stopped {
