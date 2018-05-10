@@ -1027,6 +1027,7 @@ func (r *rancherExporter) collectingExtending() {
 			restarting
 			updatingActive
 			active
+			initializing
 		)
 
 		for serviceMsg := range r.servicesBuff {
@@ -1223,7 +1224,7 @@ func (r *rancherExporter) collectingExtending() {
 								extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 								extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-								logger.Infoln("service [", serviceMsg.name, "ins:stopped ] bs count + 1")
+								logger.Infoln("service [", serviceMsg.name, "ins:protected start ] bs count + 1")
 
 								if servicesRespBytes, err := hc.get(cattleURL + "/stacks/" + serviceMsg.parentId + "/services"); err == nil {
 									_, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[1]")
@@ -1232,7 +1233,7 @@ func (r *rancherExporter) collectingExtending() {
 										extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
 										extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
 
-										logger.Infoln("stack [", stackName, "ins:stopped ] bs count + 1")
+										logger.Infoln("stack [", stackName, "ins:protected start ] bs count + 1")
 
 									}
 								}
@@ -1312,8 +1313,11 @@ func (r *rancherExporter) collectingExtending() {
 					atomic.CompareAndSwapInt64(countPtr.(*int64), activating, active) ||
 					atomic.CompareAndSwapInt64(countPtr.(*int64), rollingBack, active) ||
 					atomic.CompareAndSwapInt64(countPtr.(*int64), updatingActive, active) ||
-					atomic.CompareAndSwapInt64(countPtr.(*int64), stopped, active) {
-					if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" { // healthy start
+					atomic.CompareAndSwapInt64(countPtr.(*int64), stopped, active) ||
+					atomic.CompareAndSwapInt64(countPtr.(*int64), initializing, active) {
+					if serviceMsg.healthState == "initializing" {
+						atomic.StoreInt64(countPtr.(*int64), initializing)
+					} else if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" { // healthy start
 						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
 						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
 						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
@@ -1328,7 +1332,30 @@ func (r *rancherExporter) collectingExtending() {
 					}
 
 				}
-			case "inactive", "removed":
+			case "removed":
+				countPtr, exist := activatingServicesLoop.Load(loopKey)
+				if !exist {
+					continue
+				}
+
+				if atomic.LoadInt64(countPtr.(*int64)) == activating {
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+					logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
+				}
+
+				if serviceMsg.healthState == "initializing" {
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
+					extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+					logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
+				}
+
+				fallthrough
+			case "inactive":
 				activatingServicesLoop.Delete(loopKey)
 			}
 		}
@@ -1339,10 +1366,11 @@ func (r *rancherExporter) collectingExtending() {
 		activatingInstancesLoop := &sync.Map{}
 
 		const (
-			stopped  int64 = iota
+			stopped      int64 = iota
 			stopping
 			starting
 			running
+			initializing
 		)
 
 		for instanceMsg := range r.instancesBuff {
@@ -1350,11 +1378,11 @@ func (r *rancherExporter) collectingExtending() {
 
 			switch instanceMsg.state {
 			case "starting":
-				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.name)
+				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.id)
 				if !exist {
 					count := stopping
 					countPtr = &count
-					activatingInstancesLoop.Store(instanceMsg.name, countPtr)
+					activatingInstancesLoop.Store(instanceMsg.id, countPtr)
 				}
 
 				if atomic.CompareAndSwapInt64(countPtr.(*int64), stopping, starting) { // from stopping (Instance Restart)
@@ -1375,7 +1403,7 @@ func (r *rancherExporter) collectingExtending() {
 				}
 
 			case "running":
-				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.name)
+				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.id)
 				if !exist {
 					continue
 				}
@@ -1398,13 +1426,14 @@ func (r *rancherExporter) collectingExtending() {
 				}
 
 				if atomic.CompareAndSwapInt64(countPtr.(*int64), stopped, running) ||
-					atomic.CompareAndSwapInt64(countPtr.(*int64), starting, running) {
+					atomic.CompareAndSwapInt64(countPtr.(*int64), starting, running) ||
+					atomic.CompareAndSwapInt64(countPtr.(*int64), initializing, running) {
 
 					if len(instanceMsg.healthState) == 0 { // without health check
 						go func(instanceMsg buffMsg) {
 							time.Sleep(5 * time.Second)
 
-							if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.name); ok {
+							if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.id); ok {
 								if atomic.LoadInt64(countPtr.(*int64)) == running {
 									extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
 									extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
@@ -1412,19 +1441,21 @@ func (r *rancherExporter) collectingExtending() {
 									extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
 
 									logger.Infoln("instance running [", instanceMsg.name, "] bs success + 1")
-									activatingInstancesLoop.Delete(instanceMsg.name)
+									activatingInstancesLoop.Delete(instanceMsg.id)
 								}
 							}
 						}(instanceMsg)
 					} else {
-						if instanceMsg.healthState == "healthy" {
+						if instanceMsg.healthState == "initializing" {
+							atomic.StoreInt64(countPtr.(*int64), initializing)
+						} else if instanceMsg.healthState == "healthy" {
 							extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
 							extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
 							extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
 							extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
 
 							logger.Infoln("instance [", instanceMsg.name, "] bs success + 1")
-							activatingInstancesLoop.Delete(instanceMsg.name)
+							activatingInstancesLoop.Delete(instanceMsg.id)
 						} else if instanceMsg.healthState == "unhealthy" {
 							extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
 							extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
@@ -1432,12 +1463,12 @@ func (r *rancherExporter) collectingExtending() {
 							extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
 
 							logger.Infoln("instance [", instanceMsg.name, "] bs error + 1")
-							activatingInstancesLoop.Delete(instanceMsg.name)
+							activatingInstancesLoop.Delete(instanceMsg.id)
 						}
 					}
 				}
 			case "stopping":
-				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.name)
+				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.id)
 				if !exist {
 					count := stopped
 					activatingInstancesLoop.Store(instanceMsg.name, &count)
@@ -1445,12 +1476,34 @@ func (r *rancherExporter) collectingExtending() {
 				}
 
 				atomic.CompareAndSwapInt64(countPtr.(*int64), running, stopping)
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), initializing, stopping) && instanceMsg.healthState == "initializing" { // during health check to upgrade
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
+
+					logger.Infoln("instance [", instanceMsg.name, "] bs error + 1")
+
+					activatingInstancesLoop.Delete(instanceMsg.id)
+				}
 			case "stopped":
-				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.name)
+				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.id)
 				if !exist {
 					count := stopped
 					activatingInstancesLoop.Store(instanceMsg.name, &count)
 					continue
+				}
+
+				if atomic.LoadInt64(countPtr.(*int64)) == initializing && instanceMsg.healthState == "initializing" {
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
+
+					logger.Infoln("instance [", instanceMsg.name, "] bs error + 1")
+
+					activatingInstancesLoop.Delete(instanceMsg.id)
 				}
 
 				if atomic.CompareAndSwapInt64(countPtr.(*int64), stopping, stopped) {
@@ -1458,7 +1511,7 @@ func (r *rancherExporter) collectingExtending() {
 						if len(instanceMsg.parentId) != 0 {
 							time.Sleep(10 * time.Second)
 
-							if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.name); ok {
+							if countPtr, ok := activatingInstancesLoop.Load(instanceMsg.id); ok {
 								if atomic.LoadInt64(countPtr.(*int64)) == stopped {
 									// if service is active then
 									hc := newHttpClient(10 * time.Second)
@@ -1471,7 +1524,7 @@ func (r *rancherExporter) collectingExtending() {
 											extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
 
 											logger.Infoln("instance stopped [", instanceMsg.name, "] bs success + 1")
-											activatingInstancesLoop.Delete(instanceMsg.name)
+											activatingInstancesLoop.Delete(instanceMsg.id)
 										}
 									}
 								}
@@ -1480,8 +1533,37 @@ func (r *rancherExporter) collectingExtending() {
 					}(instanceMsg)
 				}
 			case "removed":
-				activatingInstancesLoop.Delete(instanceMsg.name)
+				_, exist := activatingInstancesLoop.Load(instanceMsg.id)
+				if !exist {
+					continue
+				}
+
+				if instanceMsg.healthState == "initializing" { // health check to resume
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
+					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
+
+					logger.Infoln("instance [", instanceMsg.name, "] bs error + 1")
+				}
+
+				activatingInstancesLoop.Delete(instanceMsg.id)
+			case "error":
+				_, exist := activatingInstancesLoop.Load(instanceMsg.id)
+				if !exist {
+					continue
+				}
+
+				extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag).Inc()
+				extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
+				extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
+				extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
+
+				logger.Infoln("instance [", instanceMsg.name, "] bs error + 1")
+
+				activatingInstancesLoop.Delete(instanceMsg.id)
 			}
+
 		}
 
 	}()
