@@ -912,7 +912,7 @@ func (r *rancherExporter) collectingExtending() {
 		activatingStackLoop := &sync.Map{}
 
 		const (
-			activating int64 = iota
+			activating   int64 = iota
 			active
 			inactive
 			initializing
@@ -988,7 +988,26 @@ func (r *rancherExporter) collectingExtending() {
 						logger.Infoln("stack [", stackMsg.name, ", inactive -> activating ] be count + 1")
 					}
 				} else if stackMsg.healthState == "initializing" {
-					atomic.CompareAndSwapInt64(countPtr.(*int64), active, initializing)
+					if atomic.CompareAndSwapInt64(countPtr.(*int64), active, initializing) {
+						hc := newHttpClient(10 * time.Second)
+						if servicesRespBytes, err := hc.get(cattleURL + "/stacks/" + stackMsg.id + "/services"); err == nil {
+							_, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[1]")
+							if err == jsonparser.KeyPathNotFoundError {
+								serviceRespBytes, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[0]")
+								if err == nil {
+									healthState, _ := jsonparser.GetString(serviceRespBytes, "healthState")
+									state, _ := jsonparser.GetString(serviceRespBytes, "state")
+									if state == "active" && healthState == "initializing" {
+										extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+										extendingTotalStackBootstraps.WithLabelValues(projectName, stackMsg.name).Inc()
+
+										logger.Infoln("stack [", stackMsg.name, ", svc:restart ] be count + 1")
+									}
+								}
+							}
+						}
+
+					}
 					continue
 				}
 
@@ -1163,6 +1182,23 @@ func (r *rancherExporter) collectingExtending() {
 						extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
 						logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
+					} else if serviceMsg.healthState == "initializing" {
+						atomic.StoreInt64(countPtr.(*int64), initializing)
+					}
+
+				} else if atomic.CompareAndSwapInt64(countPtr.(*int64), initializing, upgraded) {
+					if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" { // healthy start
+						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
+						extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+						logger.Infoln("service [", serviceMsg.name, "] be success + 1")
+					} else if serviceMsg.healthState == "unhealthy" { // unhealthy start
+						extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+						extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, specialTag).Inc()
+						extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+						logger.Infoln("service [", serviceMsg.name, "] bs error + 1")
 					}
 				}
 			case "rolling-back":
@@ -1192,7 +1228,7 @@ func (r *rancherExporter) collectingExtending() {
 								extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
 								extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
 
-								logger.Infoln("stack [", stackName, "svc:rolling-back ] be count + 1")
+								logger.Infoln("stack [", stackName, ", svc:rolling-back ] be count + 1")
 
 								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
 								extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackName).Inc()
@@ -1207,7 +1243,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 					extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-					logger.Infoln("service [", serviceMsg.name, "upgraded/canceled-upgrade -> rolling-back ] be count + 1")
+					logger.Infoln("service [", serviceMsg.name, ", upgraded/canceled-upgrade -> rolling-back ] be count + 1")
 
 				}
 			case "updating-active":
@@ -1229,7 +1265,7 @@ func (r *rancherExporter) collectingExtending() {
 								extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
 								extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
 
-								logger.Infoln("service [", serviceMsg.name, "ins:protected start ] be count + 1")
+								logger.Infoln("service [", serviceMsg.name, ", ins:protected start ] be count + 1")
 
 								if servicesRespBytes, err := hc.get(cattleURL + "/stacks/" + serviceMsg.parentId + "/services"); err == nil {
 									_, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[1]")
@@ -1237,7 +1273,7 @@ func (r *rancherExporter) collectingExtending() {
 										extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
 										extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
 
-										logger.Infoln("stack [", stackName, "ins:protected start ] be count + 1")
+										logger.Infoln("stack [", stackName, ", ins:protected start ] be count + 1")
 
 									}
 								}
@@ -1260,6 +1296,12 @@ func (r *rancherExporter) collectingExtending() {
 			case "active":
 				countPtr, exist := activatingServicesLoop.Load(loopKey)
 				if !exist {
+					count := active
+					countPtr = &count
+					activatingServicesLoop.Store(loopKey, countPtr)
+				}
+
+				if atomic.CompareAndSwapInt64(countPtr.(*int64), upgraded, active) {
 					continue
 				}
 
@@ -1288,10 +1330,12 @@ func (r *rancherExporter) collectingExtending() {
 							_, _, _, err := jsonparser.Get(servicesRespBytes, "data", "[1]")
 							if err == jsonparser.KeyPathNotFoundError {
 
-								extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
-								extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
+								if serviceMsg.healthState != "initializing" { // for service restarting
+									extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
+									extendingTotalStackBootstraps.WithLabelValues(projectName, stackName).Inc()
 
-								logger.Infoln("stack [", stackName, "svc:restart ] be count + 1")
+									logger.Infoln("stack [", stackName, ", svc:restart ] be count + 1")
+								}
 
 								if serviceMsg.healthState == "healthy" || serviceMsg.healthState == "started-once" {
 									extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag).Inc()
@@ -1309,8 +1353,18 @@ func (r *rancherExporter) collectingExtending() {
 					}
 				}
 
-				if atomic.CompareAndSwapInt64(countPtr.(*int64), upgraded, active) {
-					continue
+				if count == active {
+					if serviceMsg.healthState == "initializing" {
+						atomic.StoreInt64(countPtr.(*int64), initializing)
+
+						extendingTotalServiceBootstraps.WithLabelValues(projectName, specialTag, specialTag).Inc()
+						extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, specialTag).Inc()
+						extendingTotalServiceBootstraps.WithLabelValues(projectName, stackName, serviceMsg.name).Inc()
+
+						logger.Infoln("service [", serviceMsg.name, ", active -> initializing ] be count + 1")
+
+						continue
+					}
 				}
 
 				if atomic.CompareAndSwapInt64(countPtr.(*int64), restarting, active) ||
@@ -1370,7 +1424,7 @@ func (r *rancherExporter) collectingExtending() {
 		activatingInstancesLoop := &sync.Map{}
 
 		const (
-			stopped      int64 = iota
+			stopped        int64 = iota
 			stopping
 			starting
 			running
@@ -1404,7 +1458,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
 					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
 
-					logger.Infoln("instance [", instanceMsg.name, "none -> starting ] be count + 1")
+					logger.Infoln("instance [", instanceMsg.name, ", none -> starting ] be count + 1")
 				}
 
 			case "running":
@@ -1427,7 +1481,7 @@ func (r *rancherExporter) collectingExtending() {
 					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
 					extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
 
-					logger.Infoln("instance [", instanceMsg.name, "stopped -> running ] be count + 1")
+					logger.Infoln("instance [", instanceMsg.name, ", stopped -> running ] be count + 1")
 				}
 
 				if atomic.CompareAndSwapInt64(countPtr.(*int64), stopped, running) ||
@@ -1460,7 +1514,7 @@ func (r *rancherExporter) collectingExtending() {
 								extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
 								extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
 								extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
-								logger.Infoln("instance [", instanceMsg.name, "stopped -> running ] be count + 1")
+								logger.Infoln("instance [", instanceMsg.name, ", stopped -> running ] be count + 1")
 							} else {
 								atomic.StoreInt64(countPtr.(*int64), reinitializing)
 							}
@@ -1487,7 +1541,7 @@ func (r *rancherExporter) collectingExtending() {
 				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.id)
 				if !exist {
 					count := stopped
-					activatingInstancesLoop.Store(instanceMsg.name, &count)
+					activatingInstancesLoop.Store(instanceMsg.id, &count)
 					continue
 				}
 
@@ -1507,7 +1561,7 @@ func (r *rancherExporter) collectingExtending() {
 				countPtr, exist := activatingInstancesLoop.Load(instanceMsg.id)
 				if !exist {
 					count := stopped
-					activatingInstancesLoop.Store(instanceMsg.name, &count)
+					activatingInstancesLoop.Store(instanceMsg.id, &count)
 					continue
 				}
 
@@ -1547,6 +1601,9 @@ func (r *rancherExporter) collectingExtending() {
 							}
 						}
 					}(instanceMsg)
+
+				} else {
+					atomic.CompareAndSwapInt64(countPtr.(*int64), running, stopped)
 				}
 			case "removed":
 				_, exist := activatingInstancesLoop.Load(instanceMsg.id)
