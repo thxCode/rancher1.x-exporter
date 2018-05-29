@@ -32,7 +32,7 @@ func main() {
 	app := cli.NewApp()
 	app.Name = "rancher_exporter"
 	app.Version = version.Print("rancher_exporter")
-	app.Usage = "A simple server that scrapes Rancher 1.6 stats and exports them via HTTP for Prometheus consumption."
+	app.Usage = "A simple server that scrapes Rancher 1.6.14 stats and exports them via HTTP for Prometheus consumption."
 	app.Action = appAction
 
 	app.Flags = []cli.Flag{

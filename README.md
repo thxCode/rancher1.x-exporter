@@ -19,7 +19,7 @@ An exporter exposes some [metrics](METRICS.md) of Rancher1.x to Prometheus.
 ```bash
 $ rancher-exporter -h
 NAME:
-   rancher_exporter - A simple server that scrapes Rancher 1.6 stats and exports them via HTTP for Prometheus consumption.
+   rancher_exporter - A simple server that scrapes Rancher 1.6.14 stats and exports them via HTTP for Prometheus consumption.
 
 USAGE:
    rancher-exporter [global options] command [command options] [arguments...]
