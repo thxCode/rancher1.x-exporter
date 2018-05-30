@@ -24,8 +24,8 @@ const (
 
 var (
 	/**
-		InfinityWorks
-	 */
+	InfinityWorks
+	*/
 
 	agentStates   = []string{"activating", "active", "reconnecting", "disconnected", "disconnecting", "finishing-reconnect", "reconnected"}
 	hostStates    = []string{"activating", "active", "deactivating", "error", "erroring", "inactive", "provisioned", "purged", "purging", "registering", "removed", "removing", "requested", "restoring", "updating_active", "updating_inactive"}
@@ -84,8 +84,8 @@ var (
 		}, []string{"id", "stack_id", "name", "stack_name", "state", "system"})
 
 	/**
-		Extended
-	 */
+	Extended
+	*/
 
 	// total counter of stack, service, instance
 
@@ -267,8 +267,8 @@ type buffMsg struct {
 }
 
 /**
-	RancherExporter
- */
+RancherExporter
+*/
 type rancherExporter struct {
 	projectId     string
 	projectName   string
@@ -932,6 +932,12 @@ func (r *rancherExporter) collectingExtending() {
 			extendingTotalStackBootstraps.WithLabelValues(projectName, specialTag).Inc()
 			extendingTotalStackBootstraps.WithLabelValues(projectName, stackMsg.name).Inc()
 
+			extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, specialTag)
+			extendingTotalSuccessStackBootstrap.WithLabelValues(projectName, stackMsg.name)
+
+			extendingTotalErrorStackBootstrap.WithLabelValues(projectName, specialTag)
+			extendingTotalErrorStackBootstrap.WithLabelValues(projectName, stackMsg.name)
+
 			logger.Infof("stack [%s] be count + 1", stackMsg.name)
 		}
 		stkSuccess := func(stackMsg *buffMsg) {
@@ -954,20 +960,28 @@ func (r *rancherExporter) collectingExtending() {
 			extendingTotalServiceBootstraps.WithLabelValues(projectName, serviceMsg.stackName, specialTag).Inc()
 			extendingTotalServiceBootstraps.WithLabelValues(projectName, serviceMsg.stackName, serviceMsg.name).Inc()
 
-			logger.Infof("service [%s] be count + 1", serviceMsg.name)
-		}
-		svcSuccess := func(serviceMsg *buffMsg) {
 			extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
 			extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, serviceMsg.stackName, specialTag)
 			extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, serviceMsg.stackName, serviceMsg.name)
+
+			extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
+			extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, serviceMsg.stackName, specialTag)
+			extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, serviceMsg.stackName, serviceMsg.name)
+
+			logger.Infof("service [%s] be count + 1", serviceMsg.name)
+		}
+		svcSuccess := func(serviceMsg *buffMsg) {
+			extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+			extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, serviceMsg.stackName, specialTag).Inc()
+			extendingTotalSuccessServiceBootstrap.WithLabelValues(projectName, serviceMsg.stackName, serviceMsg.name).Inc()
 
 			logger.Infof("service [%s] be success + 1", serviceMsg.name)
 			delete(svcMap, serviceMsg.id)
 		}
 		svcFail := func(serviceMsg *buffMsg) {
-			extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag)
-			extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, serviceMsg.stackName, specialTag)
-			extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, serviceMsg.stackName, serviceMsg.name)
+			extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, specialTag, specialTag).Inc()
+			extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, serviceMsg.stackName, specialTag).Inc()
+			extendingTotalErrorServiceBootstrap.WithLabelValues(projectName, serviceMsg.stackName, serviceMsg.name).Inc()
 
 			logger.Infof("service [%s] be error + 1", serviceMsg.name)
 			delete(svcMap, serviceMsg.id)
@@ -978,6 +992,16 @@ func (r *rancherExporter) collectingExtending() {
 			extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag).Inc()
 			extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag).Inc()
 			extendingTotalInstanceBootstraps.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name).Inc()
+
+			extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+			extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag)
+			extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
+			extendingTotalSuccessInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
+
+			extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, specialTag, specialTag, specialTag)
+			extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, specialTag, specialTag)
+			extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, specialTag)
+			extendingTotalErrorInstanceBootstrap.WithLabelValues(projectName, instanceMsg.stackName, instanceMsg.serviceName, instanceMsg.name)
 
 			logger.Infof("instance [%s] be count + 1", instanceMsg.name)
 		}
@@ -1071,10 +1095,12 @@ func (r *rancherExporter) collectingExtending() {
 							}
 						}
 					case "unhealthy":
-						if _, ok := stkMap[msg.id]; ok { // try
-							delete(stkMap, msg.id)
-						} else {
+						if preState, ok := stkMap[msg.id]; !ok { // try
 							stkMap[msg.id] = stk_active_unhealthy
+						} else {
+							if preState != stk_active_initializing {
+								delete(stkMap, msg.id)
+							}
 						}
 					case "degraded":
 						if _, ok := stkMap[msg.id]; !ok {
@@ -1087,6 +1113,13 @@ func (r *rancherExporter) collectingExtending() {
 						stkFail(&msg)
 					}
 				case "removed":
+					if preState, ok := stkMap[msg.id]; ok {
+						switch preState {
+						case stk_active_initializing:
+							stkFail(&msg)
+						}
+					}
+
 					delete(stkMap, msg.id)
 					stackIdNameMap.Delete(msg.id)
 				}
@@ -1207,12 +1240,14 @@ func (r *rancherExporter) collectingExtending() {
 				case "inactive":
 					delete(svcMap, msg.id)
 				case "removed":
-					switch msg.healthState {
-					case "initializing":
-						svcFail(&msg)
-					default:
-						delete(svcMap, msg.id)
+					if _, ok := svcMap[msg.id]; ok {
+						switch msg.healthState {
+						case "initializing":
+							svcFail(&msg)
+						}
 					}
+
+					delete(svcMap, msg.id)
 				}
 
 			case "instance":
@@ -1322,7 +1357,15 @@ func (r *rancherExporter) collectingExtending() {
 				case "error":
 					insFail(&msg)
 				case "removed":
+					if _, ok := insMap[msg.id]; ok {
+						switch msg.healthState {
+						case "initializing":
+							insFail(&msg)
+						}
+					}
+
 					delete(insMap, msg.id)
+
 				}
 			}
 		}
