@@ -909,7 +909,7 @@ func (r *rancherExporter) collectingExtending() {
 
 		const (
 			stk_active_initializing state = iota
-			stk_active_degraded
+			//stk_active_degraded
 			stk_active_unhealthy
 
 			svc_activating_healthy
@@ -1050,10 +1050,10 @@ func (r *rancherExporter) collectingExtending() {
 
 				// stack add 2 service with 2 container with hc
 				// restart container:		active(initializing) -> active(healthy)
-				// stop container:			active(degraded) -> active(healthy)
-				// restart service:			active(degraded) -> active(healthy)
-				// stop service:			active(degraded) -> active(healthy)
-				// stop stack:				active(degraded) -> active(healthy)
+				// stop container:			active(initializing) -> active(healthy)
+				// restart service:			active(initializing) -> active(healthy)
+				// stop service:			active(initializing) -> active(healthy)
+				// stop stack:				active(initializing) -> active(healthy)
 				// upgrade service:			{ active(unhealthy) -> active(initializing) }-> active(initializing) -> active(healthy)
 				// rollback service:		active(initializing) -> active(healthy)
 
@@ -1072,16 +1072,16 @@ func (r *rancherExporter) collectingExtending() {
 								}
 
 								stkSuccess(&msg)
-							case stk_active_degraded:
-								if svcParentIdMap[msg.id] == svc_restarting { // when restart Svc on 1Stk nSvc nIns, Stk want to know having Svc restarting in it or not.
-									continue
-								}
-
-								if svcParentIdMap[msg.id] == svc_upgrading { // when restart Svc on 1Stk nSvc nIns, Stk want to know having Svc upgrading in it or not.
-									continue
-								}
-
-								stkSuccess(&msg)
+							//case stk_active_degraded:
+							//	if svcParentIdMap[msg.id] == svc_restarting { // when restart Svc on 1Stk nSvc nIns, Stk want to know having Svc restarting in it or not.
+							//		continue
+							//	}
+							//
+							//	if svcParentIdMap[msg.id] == svc_upgrading { // when restart Svc on 1Stk nSvc nIns, Stk want to know having Svc upgrading in it or not.
+							//		continue
+							//	}
+							//
+							//	stkSuccess(&msg)
 							}
 						}
 					case "initializing":
@@ -1102,11 +1102,11 @@ func (r *rancherExporter) collectingExtending() {
 								delete(stkMap, msg.id)
 							}
 						}
-					case "degraded":
-						if _, ok := stkMap[msg.id]; !ok {
-							stkMap[msg.id] = stk_active_degraded
-							stkCount(&msg)
-						}
+					//case "degraded":
+					//	if _, ok := stkMap[msg.id]; !ok {
+					//		stkMap[msg.id] = stk_active_degraded
+					//		stkCount(&msg)
+					//	}
 					}
 				case "error":
 					if _, ok := stkMap[msg.id]; ok { // try
